@@ -7,6 +7,7 @@ import logging
 import pystrix
 import threading
 import redis
+from socket import setdefaulttimeout
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
@@ -39,6 +40,15 @@ class FastAGIServer(threading.Thread):
         self._fagi_server.register_script_handler(
             re.compile('omni-retrieve-conf'), self.omni_retrieve_conf)
         
+        self._fagi_server.register_script_handler(
+            re.compile('omni-blacklist'), self.omni_blacklist)
+        
+        self._fagi_server.register_script_handler(
+            re.compile('omni-agent-status'), self.omni_agent_status)
+
+        self._fagi_server.register_script_handler(
+            re.compile('omni-survey-answer'), self.omni_survey_answer)
+
 # -------------------------------------------------------------------------------------
 #   AGI Examples
 # -------------------------------------------------------------------------------------
@@ -96,7 +106,12 @@ class FastAGIServer(threading.Thread):
 # -------------------------------------------------------------------------------------
 #   Agi OML
 # -------------------------------------------------------------------------------------
-    
+
+    def write_time_stderr(str_value):
+        fecha = datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S.%f')
+        sys.stderr.write("{0}: {1}".format(fecha, str_value))
+
+    # Retrieve config from Redis and Set chanvars in order to pass to the dialplan
     def omni_retrieve_conf(self, agi, *args, **kwargs):
 
         arguments = args[0]
@@ -128,6 +143,98 @@ class FastAGIServer(threading.Thread):
             else:
                 write_time_stderr(f"Unable to get Family DATA for {family_key}")
 
+
+
+    # Blacklist check if number is on the blacklist REDIS
+    def omni_blacklist(self, agi, *args, **kwargs):
+        
+        arguments = args[0]
+        phone_number = arguments[0]
+
+        black_list_key = 'OML:BLACKLIST'
+        redis_connection = redis.Redis(
+            host=os.getenv('REDIS_HOSTNAME'),
+            port=6379,
+            decode_responses=True
+        )
+
+        try:
+            is_black_listed = int(redis_connection.sismember(black_list_key, phone_number))
+        except redis.exceptions.RedisError as e:
+            write_time_stderr("Error executing Redis command SISMEMBER: {0}".format(e))
+            # Si falla el servicio, devuelve código de error
+            is_black_listed = BLACKLIST_ERROR_CODE
+
+        try:
+            agi.set_variable('BLACKLIST', str(is_black_listed))
+        except Exception as e:
+            write_time_stderr("Unable to set variable BLACKLIST in channel due to {0}".format(e))
+            raise e
+
+    # Set or Get the Agent STATUS
+    def omni_agent_status(self, agi, *args, **kwargs):
+        
+        arguments = args[0]
+        
+        command = arguments[0]
+        agent_id = arguments[1]
+        agent_key = 'OML:AGENT:' + agent_id
+
+        redis_connection = redis.Redis(
+            host=os.getenv('REDIS_HOSTNAME'),
+            port=6379,
+            decode_responses=True
+        )
+
+        if command not in ['GET', 'SET']:
+            write_time_stderr("Unknown command {0}".format(command))
+        elif command == 'GET':
+            try:
+                agent_data = redis_connection.hgetall(agent_key)
+            except redis.exceptions.RedisError as e:
+                write_time_stderr("Error executing Redis command HGETALL: {0}".format(e))
+            else:
+                if agent_data:
+                    try:
+                        agi.set_variable('__OMLAGENTNAME', agent_data['NAME'])
+                        agi.set_variable('OMLAGENTSIP', agent_data['SIP'])
+                        agi.set_variable('OMLAGENTSTATUS', agent_data['STATUS'])
+                        agi.set_variable('PAUSE_ID', agent_data.get('PAUSE_ID', ''))
+                    except Exception as e:
+                        write_time_stderr("Unable to set variable in channel due to {0}".format(e))
+                        raise e
+                else:
+                    write_time_stderr("Unable to get Agent DATA for {0}".format(agent_key))
+        elif command == 'SET':
+            data = {
+                'STATUS': arguments[2],
+                'TIMESTAMP': arguments[3],
+                'CAMPAIGN': arguments[4] if len(arguments) >= 5 else '',
+                'CONTACT_NUMBER': arguments[5] if len(arguments) >= 6 else '',
+            }
+            try:
+                agent_data = redis_connection.hset(agent_key, mapping=data)
+            except redis.exceptions.RedisError as e:
+                write_time_stderr("Error executing Redis command SET: {0}".format(e))
+                # Aquí puedes decidir cómo manejar el error al ejecutar el comando SET en Redis
+
+
+    # Survey Addon
+    def omni_survey_answer(self, sys_argv):
+        agi = AGI()
+        redis_connection = redis.Redis(
+            host=os.getenv('REDIS_HOSTNAME'),
+            port=6379,
+            decode_responses=True
+        )
+
+        data = json.dumps(sys_argv[1:10])
+        family_key = 'OML:QUEUE:SURVEY_ANSWERS'
+
+        try:
+            family_data = redis_connection.rpush(family_key, data)
+        except redis.exceptions.RedisError as e:
+            write_time_stderr("Error executing redis command RPUSH: {0}".format(e))
 
 
     def kill(self):
