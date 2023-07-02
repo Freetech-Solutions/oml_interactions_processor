@@ -2,18 +2,26 @@ import os
 import re
 import sys
 import time
-import django
 import logging
 import pystrix
 import threading
 import redis
 from socket import setdefaulttimeout
+import datetime
+
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.DEBUG)
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG)
+
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+stdout_handler.setFormatter(formatter)
+
+root_logger.addHandler(stdout_handler)
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'Fastagi.settings')
-django.setup()
-
 
 class FastAGIServer(threading.Thread):
 
@@ -107,9 +115,8 @@ class FastAGIServer(threading.Thread):
 #   Agi OML
 # -------------------------------------------------------------------------------------
 
-    def write_time_stderr(str_value):
-        fecha = datetime.strftime(datetime.now(), '%Y-%m-%d %H:%M:%S.%f')
-        sys.stderr.write("{0}: {1}".format(fecha, str_value))
+    def write_time_stderr(message):
+        root_logger.error(message)
 
     # Retrieve config from Redis and Set chanvars in order to pass to the dialplan
     def omni_retrieve_conf(self, agi, *args, **kwargs):
@@ -166,16 +173,13 @@ class FastAGIServer(threading.Thread):
             is_black_listed = BLACKLIST_ERROR_CODE
 
         try:
-            agi.set_variable('BLACKLIST', str(is_black_listed))
+            agi.execute(pystrix.agi.core.SetVariable('BLACKLIST', str(is_black_listed)))
         except Exception as e:
             write_time_stderr("Unable to set variable BLACKLIST in channel due to {0}".format(e))
             raise e
 
-    # Set or Get the Agent STATUS
     def omni_agent_status(self, agi, *args, **kwargs):
-        
         arguments = args[0]
-        
         command = arguments[0]
         agent_id = arguments[1]
         agent_key = 'OML:AGENT:' + agent_id
@@ -196,10 +200,10 @@ class FastAGIServer(threading.Thread):
             else:
                 if agent_data:
                     try:
-                        agi.set_variable('__OMLAGENTNAME', agent_data['NAME'])
-                        agi.set_variable('OMLAGENTSIP', agent_data['SIP'])
-                        agi.set_variable('OMLAGENTSTATUS', agent_data['STATUS'])
-                        agi.set_variable('PAUSE_ID', agent_data.get('PAUSE_ID', ''))
+                        agi.execute(pystrix.agi.core.SetVariable('__OMLAGENTNAME', agent_data['NAME']))
+                        agi.execute(pystrix.agi.core.SetVariable('OMLAGENTSIP', agent_data['SIP']))
+                        agi.execute(pystrix.agi.core.SetVariable('OMLAGENTSTATUS', agent_data['STATUS']))
+                        agi.execute(pystrix.agi.core.SetVariable('PAUSE_ID', agent_data.get('PAUSE_ID', '')))
                     except Exception as e:
                         write_time_stderr("Unable to set variable in channel due to {0}".format(e))
                         raise e
@@ -216,7 +220,8 @@ class FastAGIServer(threading.Thread):
                 agent_data = redis_connection.hset(agent_key, mapping=data)
             except redis.exceptions.RedisError as e:
                 write_time_stderr("Error executing Redis command SET: {0}".format(e))
-                # Aquí puedes decidir cómo manejar el error al ejecutar el comando SET en Redis
+                # Here you can decide how to handle the error when executing the SET command in Redis
+
 
 
     # Survey Addon
