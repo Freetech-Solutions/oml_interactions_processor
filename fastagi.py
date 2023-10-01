@@ -166,6 +166,7 @@ class FastAGIServer(threading.Thread):
             'numero_extra': numero_extra
         }
 
+        # Insert to Postgres for history KPIs
         insert_query = sql.SQL(
             'INSERT INTO reportes_app_llamadalog ({}) VALUES ({})'
         ).format(
@@ -181,6 +182,54 @@ class FastAGIServer(threading.Thread):
         finally:
             cursor.close()
             conn.close()
+
+        # Insert to Redis for Realtime KPIs
+        # call_direction = 'UNKNOWN'
+
+        # if tipo_llamada in ['1','2','4','5']:
+        #     call_direction = 'OUTBOUND'
+        # elif tipo_llamada == 3:
+        #     call_direction = 'OUTBOUND'
+        redis_key_camp = f'OML:REALTIME:CAMP:{campana_id}'        
+        field_campana = f'CALL_TYPE:{tipo_llamada}:{event}'
+        self.event_camp_sum(redis_key_camp, field_campana)
+
+        redis_key_agent = f'OML:REALTIME:AGENT:{agente_id}'
+        field_agent = f'CALL_TYPE:{tipo_llamada}:{event}'
+        self.event_agent_sum(redis_key_agent, field_agent, event)
+        
+    # Redis INCRDB 
+    def event_camp_sum(self, redis_key, field):
+        try:
+            redis_connection = redis.Redis(
+                host=os.getenv('REDIS_HOSTNAME'),
+                port=6379,
+                db=2,
+                decode_responses=True
+            )
+            redis_connection.hincrby(redis_key, field, 1)
+        except redis.exceptions.RedisError as e:
+            print(f"Error al incrementar el valor en Redis: {e}")
+        except Exception as ex:
+            print(f"Error inesperado: {ex}")
+
+    def event_agent_sum(self, redis_key, field, event):
+        try:
+            redis_connection = redis.Redis(
+                host=os.getenv('REDIS_HOSTNAME'),
+                port=6379,
+                db=2,
+                decode_responses=True
+            )
+ 
+            if event in ["ANSWER", "CONNECT", "RINGNOANSWER", "DIAL"]:
+                redis_connection.hincrby(redis_key, field, 1)
+            else:
+                print("nothing")
+        except redis.exceptions.RedisError as e:
+            print(f"Error al incrementar el valor en Redis: {e}")
+        except Exception as ex:
+            print(f"Error inesperado: {ex}")
 
 
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
@@ -309,7 +358,6 @@ class FastAGIServer(threading.Thread):
             family_data = redis_connection.rpush(family_key, data)
         except redis.exceptions.RedisError as e:
             self.write_time_stderr("Error executing redis command RPUSH: {0}".format(e))
-
 
 
     def kill(self):

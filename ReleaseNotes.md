@@ -1,10 +1,9 @@
 # Release Notes
-2023-08-11
+2023-10-01
 
 ## Added
 
-* oml-305 Call logger method
-* oml-305 Time Zone parameter
+* oml-304 Call day statistics stored in a Redis hash for real-time web views
 
 ## Changed
 
