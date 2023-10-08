@@ -42,3 +42,4 @@ wsproto==1.2.0
 yarl==1.8.1
 zope.interface==5.5.1
 asyncio==3.4.3
+rel==0.4.9
