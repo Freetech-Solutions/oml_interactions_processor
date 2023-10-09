@@ -5,96 +5,62 @@ import os
 import json
 import sys 
 import logging
+import redis
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-class Queue:
+redis_connection = redis.Redis(
+    host=os.getenv('REDIS_HOSTNAME', 'localhost'),  # Puedes proporcionar un valor por defecto en caso de que la variable de entorno no esté configurada
+    port=6379,
+    db=2,
+    decode_responses=True  # Para que las respuestas se decodifiquen como str y no como bytes
+)
 
-    survey_options = [
-        {
-            'audio': 'tt-weasels',
-            'type': 1,
-            'options': []
-        },
-        {
-            'audio': 'demo-congrats',
-            'type': 2,
-            'options': ['1', '2', '3', '4', '5']
-        },
-        {
-            'audio': 'custom/P2_ENC',
-            'type': 2,
-            'options': ['1', '2', '3', '4', '5']
-        },
-        {
-            'audio': 'custom/P3_ENC',
-            'type': 2,
-            'options': ['1', '2', '3', '4', '5']
-        },
-    ]
+class CallManager:
+    def __init__(self):
+        self.bridge_id = None
+        self.ari = ARI()  
 
-    def __init__(self, max_attempts=3):
-        self.question = 0
-        self.sound = None
-        self.options = None
-        self.attempts = 0
-        self.playback_id = None
-        self.answers = {}
-        self.max_attempts = max_attempts
+    def handle_stasis_start(self, event):        
+        # PSTN channel
+        if 'caller' in event['channel']:  
+            channel_id = event['channel']['id'] 
+            self.ari.answer(channel_id)
+            self.ari.playback(channel_id, 'beep')
+            
+            # Crear un bridge
+            bridge_response = self.ari.create_bridge()
+            self.bridge_id = bridge_response['id']  # Aquí estamos usando la propiedad de la clase
+            
+            # Agregar el canal entrante al bridge
+            self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
 
-    def inc_attempts(self):
-        self.attempts += 1
+            # Originar un nuevo canal al agente PJSIP/1005 y añadirlo a tu aplicación Stasis
+            self.ari.originate_channel('PJSIP/1004', 'context', 'exten', 'priority')
 
-    # def answer_register(self, answer):
-    #     if self.question not in self.answers.keys():
-    #         self.answers[self.question] = answer
-    #         self.next_question()
+        # agent channel
+        else:  
+            channel_id = event['channel']['id'] 
+            # Agregar el canal originado al bridge creado arriba
+            self.ari.add_channel_to_bridge(bridge_id, channel_id)
 
-    # def is_finish(self):
-    #     return (True if self.question >= len(self.survey_options) or
-    #             self.attempts >= self.max_attempts else False)
+    def handle_dial(self, event):
+        dialstatus = event['dialstatus']
+        logging.info(f"****** Dial Event - Status: {dialstatus} ********")
 
-    # def is_answered(self):
-    #     return self.question in self.answers
-
-memory_route = {}
+call_manager = CallManager()
 
 def on_message(ws, message):
-    ari_object = ARI()
+    #logging.info(f"Received Message: {message}")
     event_to_dict = json.loads(message)
     event = event_to_dict.get('type', 'default')
 
     if event == 'StasisStart':
-        channel_id = event_to_dict['channel']['id']
+        call_manager.handle_stasis_start(event_to_dict)
+    elif event == 'Dial':
+        call_manager.handle_dial(event_to_dict)
+        logging.info("****** Ringing ********")
         
-        # Responder al canal de la llamada entrante
-        ari_object.answer(channel_id)
-        
-        # Reproducir un mensaje de bienvenida o música en espera
-        ari_object.playback(channel_id, 'tt-weasels')
-        
-        # Crear un bridge
-        bridge_response = ari_object.create_bridge()
-        bridge_id = bridge_response['id']  # Asegúrate de que tu método `post` devuelva la respuesta JSON parseada
-        
-        # Agregar el canal entrante al bridge
-        ari_object.add_channel_to_bridge(bridge_id, channel_id)
-
-        # Originar un nuevo canal al agente PJSIP/1005 y añadirlo a tu aplicación Stasis
-        # (aquí necesitarías manejar la lógica cuando este canal entre en Stasis y entonces agregarlo al bridge)
-        ari_object.originate_channel('PJSIP/1005', 'some_context', 'some_exten', 1)
-
-    elif event == 'StasisStart':  # Este debería ser un segundo evento StasisStart para el agente
-        channel_id = event_to_dict['channel']['id']
-        
-        # La lógica aquí debería buscar el bridge_id asociado a la llamada original y agregar el nuevo canal a él.
-        # bridge_id = obtener_bridge_id_asociado_a_la_llamada_original_de_alguna_manera
-        
-        ari_object.add_channel_to_bridge(bridge_id, channel_id)
-
-    elif event == 'PlaybackFinished':
-        # La lógica aquí puede hacer cualquier limpieza o acción adicional después de que la reproducción ha terminado.
-        pass
 
 def on_error(ws, error):
     logging.info("***** ERROR *****")
@@ -119,7 +85,7 @@ if __name__ == "__main__":
     
     # Creamos la URI del WebSocket utilizando las variables
     ws_uri = f"ws://{ASTERISK_HOST}:{ASTERISK_PORT}/ari/events"
-    ws_uri += f"?api_key={ASTERISK_USER}:{ASTERISK_PASS}&app={ASTERISK_APP}"
+    ws_uri += f"?api_key={ASTERISK_USER}:{ASTERISK_PASS}&app=Queue"
     
     ws = websocket.WebSocketApp(
         ws_uri,

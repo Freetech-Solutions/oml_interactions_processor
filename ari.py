@@ -1,5 +1,6 @@
 import requests
 import os
+import logging
 
 class ARI:
     def __init__(self, user=None, password=None, host=None, port=None):
@@ -10,17 +11,30 @@ class ARI:
 
     def post(self, route, payload=None, headers=None):
         uri = f'http://{self.host}:{self.port}/ari/{route}'
-        print(f"URI: {uri}, Payload: {payload}, Headers: {headers}")
+        logging.info(f"URI: {uri}, Payload: {payload}, Headers: {headers}")
         response = requests.post(uri, auth=(self.user, self.password), json=payload, headers=headers)
-        try:
-            return response.json()
-        except ValueError:
-            print(f"Error parsing JSON: {response.text}")
-            return response
+
+        # Verificar si la respuesta contiene un cuerpo antes de intentar analizarlo como JSON
+        if response.status_code == 204 or not response.text:
+            logging.info(f"No content in response. Status Code: {response.status_code}")
+            return None  # o cómo prefieras manejar este caso
+        else:
+            try:
+                response_json = response.json()
+                logging.info(f"Response: {response_json}")
+                return response_json
+            except ValueError:
+                logging.error(f"Error parsing JSON: {response.text}, Status Code: {response.status_code}")
+                return response
 
     def get(self, route):
         uri = f'http://{self.host}:{self.port}/ari/{route}'
-        return requests.post(uri, auth=(self.user, self.password))
+        response = requests.get(uri, auth=(self.user, self.password))
+        try:
+            return response.json()
+        except ValueError:
+            logging.error(f"GET Error parsing JSON: {response.text}, Status Code: {response.status_code}")
+            return response
 
     def delete(self, route):
         uri = f'http://{self.host}:{self.port}/ari/{route}'
@@ -72,6 +86,6 @@ class ARI:
             'context': context,
             'exten': exten,
             'priority': priority,
-            'app': 'my_stasis_app'  # reemplaza con el nombre de tu aplicación Stasis
+            'app': 'Queue'
         }
         return self.post(route, payload)
