@@ -4,10 +4,10 @@ import logging
 
 class ARI:
     def __init__(self, user=None, password=None, host=None, port=None):
-        self.host = host if host is not None else os.getenv('ARI_HOST', 'localhost')
-        self.port = port if port is not None else os.getenv('ARI_PORT', '8088')
-        self.user = user if user is not None else os.getenv('ARI_USER', 'default_user')
-        self.password = password if password is not None else os.getenv('ARI_PASS', 'default_pass')
+        self.host = host if host is not None else os.getenv('ARI_HOST', 'acd')
+        self.port = port if port is not None else os.getenv('ARI_PORT', '7088')
+        self.user = user if user is not None else os.getenv('ARI_USER', 'omnileads')
+        self.password = password if password is not None else os.getenv('ARI_PASS', '5_MeO_DMT')
 
     def post(self, route, payload=None, headers=None):
         uri = f'http://{self.host}:{self.port}/ari/{route}'
@@ -86,6 +86,18 @@ class ARI:
             'context': context,
             'exten': exten,
             'priority': priority,
-            'app': 'Queue'
+            'app': 'my_stasis_app'  # reemplaza con el nombre de tu aplicación Stasis
         }
         return self.post(route, payload)
+
+
+    def safe_hangup(self, channel_id):
+        try:
+            channel.hangup()
+        except HTTPError as e:
+            # Ignore 404's, since channels can go away before we get to them
+            if e.response.status_code != requests.codes.not_found:
+                raise
+
+    def start_moh(self, channel):
+        channel.startMoh(route, payload)     
