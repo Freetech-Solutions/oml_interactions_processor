@@ -7,6 +7,8 @@ import json
 import sys 
 import logging
 import redis
+import signal
+import traceback 
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -21,75 +23,124 @@ class CallManager:
     def __init__(self):
         self.bridge_id = None
         self.ari = ARI()
-    #     self.client = self.setup_ari_client()
+        # Obtain environment variables within this method
+        ASTERISK_USER = os.getenv('ARI_USER', 'default_user')
+        ASTERISK_PASS = os.getenv('ARI_PASS', 'default_pass')
+        ASTERISK_HOST = os.getenv('ARI_HOST', 'asterisk')
+        ASTERISK_PORT = os.getenv('ARI_PORT', '7088')
+        ASTERISK_APP = os.getenv('ASTERISK_APP', 'Queue')
 
     def client(self):
         try:
-            # Obtain environment variables within this method
-            ASTERISK_USER = os.getenv('ARI_USER', 'default_user')
-            ASTERISK_PASS = os.getenv('ARI_PASS', 'default_pass')
-            ASTERISK_HOST = os.getenv('ARI_HOST', 'asterisk')
-            ASTERISK_PORT = os.getenv('ARI_PORT', '7088')
-
             ari_client = ari.connect(f'http://{ASTERISK_HOST}:{ASTERISK_PORT}/', ASTERISK_USER, ASTERISK_PASS)
             return ari_client
         except Exception as e:
-            print(f"Error setting up ARI client: {str(e)}")
-            return None   
+            logging.error(f"Error setting up ARI client: {str(e)}")
+            logging.error(traceback.format_exc()) 
+            return None       
 
-    def handle_stasis_start(self, event):        
-        if 'caller' in event['channel']:  
-            self.handle_pstn_channel(event)
-        else:  
-            self.handle_agent_channel(event)
 
-    def handle_pstn_channel(self, event):        
-        channel_id = event['channel']['id'] 
-        self.ari.answer(channel_id)
-        self.ari.playback(channel_id, 'beep')
-            
-        # if not isinstance(channel_id, str):
-        #     logging.error(f"Unexpected type for channel_id: {type(channel_id)}")
-        #     return
-
-        # Asegúrate de que self.client está configurado correctamente
-        if not hasattr(self, "client"):
-            logging.error("self.client is not configured")
-            return
+    def handle_stasis_start(self, event): 
         
+        try:
+            if event.get('channel', {}).get('dialplan', {}).get('context') == 'from-pstn':
+                # Creamos el bridge cuando recibimos la primera llamada desde la PSTN           
+                bridge = self.ari.create_bridge()
+                if bridge is not None and 'id' in bridge:
+                    self.bridge_id = bridge.get('id') 
+                    self.handle_pstn_channel(event)
+                else:
+                    logging.error("Failed to create bridge or 'id' not present in the response.") 
+            else:
+                self.handle_agent_channel(event)
+        except Exception as e:
+            logging.error(f"Error handling stasis start: {str(e)}")    
 
-        self.ari.originate_channel('PJSIP/1004', 'some_context', 'some_exten', 1)
-
-
-        # Obtener el objeto de canal usando ari-py y el channel_id
-        # try:
-        #     channel = self.client.channels.get(channelId=channel_id)
-        # except Exception as e:
-        #     logging.error(f"Error retrieving channel object: {str(e)}")
-        #     return
-
-        # # Iniciar Music On Hold
-        # try:
+    def handle_pstn_channel(self, event):
+        logging.info(f"********* PSTN INBOUND Received Message: {event}")
+        channel_id = event['channel']['id'] 
+        
+        try:
+            self.ari.answer(channel_id)        
             
-        #     self.ari.start_moh(channel_id)
-        # except Exception as e:
-        #     logging.error(f"Error starting MOH: {str(e)}")
-        #     return
-    
+            if not isinstance(channel_id, str):
+                logging.error(f"Unexpected type for channel_id: {type(channel_id)}")
+                return
+
+            if self.bridge_id is None:
+                logging.error("Bridge is not created")
+                return
+
+            if not hasattr(self, "client"):
+                logging.error("self.client is not configured")
+                return
+            
+            # Agregar el canal PSTN al bridge
+            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
+            # if result is None or 'error' in result:  # Asume que un 'error' en la respuesta indica un fallo.
+            #     logging.error("Failed to add PSTN channel to bridge.")
+            #     return
+            
+            response = self.ari.originate_channel('PJSIP/1004', ASTERISK_APP) 
+            # response = self.ari.originate_channel('PJSIP/1004', ASTERISK_APP) 
+            # if not success:
+            #     logging.error("Failed to add PSTN channel to bridge.")
+            # return
+
+        except Exception as e:
+            logging.error(f"Error handling PSTN channel: {str(e)}")
+
+
     def handle_agent_channel(self, event):
-        logging.info(f"handle agent channel, pre-channe_id =")
+        logging.info(f"********* AGENT Channel Received Message: {event}")
         channel_id = event['channel']['id'  ] 
-        # Agregar el canal originado al bridge creado arriba
-        self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
+        
+        try: 
+            self.ari.playback(channel_id, 'beep')
+            # Agregar el canal originado al bridge creado arriba        
+            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
+            # if result is None or 'error' in result:
+            #     logging.error("Failed to add AGENT channel to bridge.")
+            #     return
+        
+        except Exception as e:
+            logging.error(f"Error handling AGENT channel: {str(e)}")
+
+
+    def handle_stasis_end(self, event):
+        channel_id = event.get('channel', {}).get('id')
+        
+        if channel_id:
+            # Aquí, podrías verificar si este canal está en tu puente.
+            # Si es así, entonces procede a verificar si hay otros canales en el puente.
+            active_channels = self.ari.get_channels_in_bridge(self.bridge_id)
+            
+            if active_channels:
+                if len(active_channels) == 1:  # Solo queda un canal; podría ser el que se está desconectando.
+                    self.ari.hangup_channel(active_channels[0])  # Desconectar el último canal.
+                    self.ari.destroy_bridge(self.bridge_id)  # Destruir el puente.
+                    self.bridge_id = None  # Restablecer el ID del puente si lo estás almacenando.
+                else:
+                    # Si hay más canales, implementa la lógica que consideres necesaria.
+                    pass
+            else:
+                # No hay canales activos, es seguro destruir el puente.
+                self.ari.destroy_bridge(self.bridge_id)
+                self.bridge_id = None  # Restablecer el ID del puente si lo estás almacenando.
+        else:
+            logging.error("StasisEnd event without channel ID")
+
 
     def handle_dial(self, event):
         dialstatus = event['dialstatus']
-        logging.info(f"****** Dial Event - Status: {dialstatus} ********")
+        logging.info(f"****** DIAL ag channel Event - Status: {dialstatus} ********")
+
 
 call_manager = CallManager()
 
+
 def on_message(ws, message):
-    logging.info(f"Received Message: {message}")
+    #logging.info(f"Received Message: {message}")
     event_to_dict = json.loads(message)
     event = event_to_dict.get('type', 'default')
 
@@ -97,8 +148,9 @@ def on_message(ws, message):
         call_manager.handle_stasis_start(event_to_dict)
     elif event == 'Dial':
         call_manager.handle_dial(event_to_dict)
-        logging.info("****** Ringing ********")
-        
+    elif event == 'StasisEnd':
+        call_manager.handle_stasis_end(event_to_dict)
+
 
 def on_error(ws, error):
     logging.info("***** ERROR *****")
@@ -124,7 +176,8 @@ if __name__ == "__main__":
     # Creamos la URI del WebSocket utilizando las variables
     ws_uri = f"ws://{ASTERISK_HOST}:{ASTERISK_PORT}/ari/events"
     ws_uri += f"?api_key={ASTERISK_USER}:{ASTERISK_PASS}&app={ASTERISK_APP}"
-    
+
+    # Configuración del WebSocket
     ws = websocket.WebSocketApp(
         ws_uri,
         on_open=on_open,
@@ -133,6 +186,14 @@ if __name__ == "__main__":
         on_close=on_close
     )
 
-    ws.run_forever(dispatcher=rel, reconnect=5)
-    rel.signal(2, rel.abort)
-    rel.dispatch()
+    # Función para manejar la señal de cierre
+    def signal_handler(signum, frame):
+        logging.info("Signal received, closing connection")
+        ws.close()
+
+    # Registro de la señal de interrupción
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    # Iniciar el loop de eventos del WebSocket
+    ws.run_forever()

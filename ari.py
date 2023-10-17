@@ -79,17 +79,16 @@ class ARI:
         payload = {'channel': channel_id}
         return self.post(route, payload)
 
-    def originate_channel(self, endpoint, context, exten, priority):
+    def originate_channel(self, endpoint, app):
         route = 'channels'
         payload = {
             'endpoint': endpoint,
-            'context': context,
-            'exten': exten,
-            'priority': priority,
-            'app': 'my_stasis_app'  # reemplaza con el nombre de tu aplicación Stasis
+            # 'context': context,
+            # 'exten': exten,
+            # 'priority': priority,
+            'app': app  # reemplaza con el nombre de tu aplicación Stasis
         }
         return self.post(route, payload)
-
 
     def safe_hangup(self, channel_id):
         try:
@@ -101,3 +100,43 @@ class ARI:
 
     def start_moh(self, channel):
         channel.startMoh(route, payload)     
+
+
+    # def get_channels_in_bridge(self, bridge_id):
+    #     route = f'bridges/{bridge_id}'
+    #     response = self.get(route)  # Estamos reutilizando tu método GET definido
+
+    #     bridge_data = response.json()
+    #     return bridge_data.get('channels', [])
+        
+    def get_channels_in_bridge(self, bridge_id):
+        route = f'bridges/{bridge_id}'
+        response = self.get(route)  # Esto podría ser un dict o un objeto requests.Response
+
+        if isinstance(response, dict):
+            # La respuesta ya está en formato JSON (dict)
+            return response.get('channels', [])
+        else:
+            # Si no es un dict, significa que hubo un error al hacer la solicitud o al analizar la respuesta.
+            if response.status_code == 200:
+                try:
+                    bridge_data = response.json()
+                    return bridge_data.get('channels', [])
+                except ValueError:
+                    logging.error(f"Error parsing response JSON for bridge {bridge_id}")
+                    return []
+            else:
+                logging.error(f"Failed to retrieve channels for bridge {bridge_id}: {response.status_code}")
+                return []
+
+    def destroy_bridge(self, bridge_id):
+        """Destruye el puente especificado por bridge_id."""
+        route = f'bridges/{bridge_id}'
+        response = self.delete(route)  # Esto usa tu método `delete` existente.
+        
+        if response.status_code == 204:  # 204 No Content es la respuesta esperada para una operación DELETE exitosa.
+            logging.info(f"Bridge {bridge_id} destroyed successfully.")
+            return True
+        else:
+            logging.error(f"Failed to destroy bridge {bridge_id}: {response.status_code}")
+            return False
