@@ -1,4 +1,5 @@
 import requests
+from requests.exceptions import HTTPError
 import os
 import logging
 
@@ -90,9 +91,9 @@ class ARI:
         }
         return self.post(route, payload)
 
-    def safe_hangup(self, channel_id):
+    def hangup_channel(self, channel_id):
         try:
-            channel.hangup()
+            self.channel.hangup(channel_id)
         except HTTPError as e:
             # Ignore 404's, since channels can go away before we get to them
             if e.response.status_code != requests.codes.not_found:
