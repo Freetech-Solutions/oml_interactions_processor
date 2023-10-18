@@ -101,14 +101,6 @@ class ARI:
 
     def start_moh(self, channel):
         channel.startMoh(route, payload)     
-
-
-    # def get_channels_in_bridge(self, bridge_id):
-    #     route = f'bridges/{bridge_id}'
-    #     response = self.get(route)  # Estamos reutilizando tu método GET definido
-
-    #     bridge_data = response.json()
-    #     return bridge_data.get('channels', [])
         
     def get_channels_in_bridge(self, bridge_id):
         route = f'bridges/{bridge_id}'
@@ -141,3 +133,19 @@ class ARI:
         else:
             logging.error(f"Failed to destroy bridge {bridge_id}: {response.status_code}")
             return False
+
+    def get_channel_variable(self, channel_id, variable_name):
+        """Obtiene una variable del canal especificado."""
+        try:
+            route = f'channels/{channel_id}/variable?variable={variable_name}'
+            response = self.get(route)  # Utilizando el método 'get' de tu clase
+
+            # Si 'response' es un diccionario, entonces la solicitud fue exitosa
+            if isinstance(response, dict):
+                return response.get('value')
+            else:
+                logging.error(f"Error al obtener la variable del canal: respuesta inesperada")
+                return None
+        except Exception as e:
+            logging.error(f"Error al obtener la variable del canal: {e}")
+            return None

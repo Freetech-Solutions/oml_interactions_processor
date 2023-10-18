@@ -9,6 +9,7 @@ import logging
 import redis
 import signal
 import traceback 
+from rabbitmq_manager import RabbitMQManager
 
 logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
@@ -23,12 +24,15 @@ class CallManager:
     def __init__(self):
         self.bridge_id = None
         self.ari = ARI()
+        self.rabbitmq_manager = RabbitMQManager()
+
         # Obtain environment variables within this method
         ASTERISK_USER = os.getenv('ARI_USER', 'default_user')
         ASTERISK_PASS = os.getenv('ARI_PASS', 'default_pass')
         ASTERISK_HOST = os.getenv('ARI_HOST', 'asterisk')
         ASTERISK_PORT = os.getenv('ARI_PORT', '7088')
         ASTERISK_APP = os.getenv('ASTERISK_APP', 'Queue')
+        
 
     def client(self):
         try:
@@ -42,13 +46,20 @@ class CallManager:
 
     def handle_stasis_start(self, event): 
         
-        try:
-            if event.get('channel', {}).get('dialplan', {}).get('context') == 'from-pstn':
+        try:        
+            args = event.get('args', [])
+            if args:
+                id_camp = args[0]  # Asumiendo que "Queue" es el primer argumento
+                custom_arg = args[1] if len(args) > 1 else None  # "nombre_argumento" es el segundo argumento
+
+            logging.info(f"Argumentos recibidos: IDCAMP: {id_camp}")
+
+            if event.get('channel', {}).get('dialplan', {}).get('context') == 'sub-oml-campaign-3':
                 # Creamos el bridge cuando recibimos la primera llamada desde la PSTN           
                 bridge = self.ari.create_bridge()
                 if bridge is not None and 'id' in bridge:
                     self.bridge_id = bridge.get('id') 
-                    self.handle_pstn_channel(event)
+                    self.handle_pstn_channel(event, id_camp)
                 else:
                     logging.error("Failed to create bridge or 'id' not present in the response.") 
             else:
@@ -56,7 +67,7 @@ class CallManager:
         except Exception as e:
             logging.error(f"Error handling stasis start: {str(e)}")    
 
-    def handle_pstn_channel(self, event):
+    def handle_pstn_channel(self, event, id_camp):
         logging.info(f"********* PSTN INBOUND Received Message: {event}")
         channel_id = event['channel']['id'] 
         
@@ -74,18 +85,14 @@ class CallManager:
             if not hasattr(self, "client"):
                 logging.error("self.client is not configured")
                 return
-            
+
             # Agregar el canal PSTN al bridge
             result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-            # if result is None or 'error' in result:  # Asume que un 'error' en la respuesta indica un fallo.
-            #     logging.error("Failed to add PSTN channel to bridge.")
-            #     return
+              
+
+            # Publicar mensaje a RabbitMQ usando el nuevo módulo
+            self.rabbitmq_manager.publish_message('Queue', f'Channel ID: {channel_id} - Camp ID: {id_camp}')
             
-            response = self.ari.originate_channel('PJSIP/1004', ASTERISK_APP) 
-            # response = self.ari.originate_channel('PJSIP/1004', ASTERISK_APP) 
-            # if not success:
-            #     logging.error("Failed to add PSTN channel to bridge.")
-            # return
 
         except Exception as e:
             logging.error(f"Error handling PSTN channel: {str(e)}")
@@ -134,7 +141,6 @@ class CallManager:
     def handle_dial(self, event):
         dialstatus = event['dialstatus']
         logging.info(f"****** DIAL ag channel Event - Status: {dialstatus} ********")
-
 
 call_manager = CallManager()
 
