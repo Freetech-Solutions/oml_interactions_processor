@@ -48,6 +48,7 @@ class CallManager:
         
         try:        
             args = event.get('args', [])
+            id_camp = None  # Asignar un valor predeterminado a id_camp
             if args:
                 id_camp = args[0]  # Asumiendo que "Queue" es el primer argumento
                 custom_arg = args[1] if len(args) > 1 else None  # "nombre_argumento" es el segundo argumento
@@ -105,20 +106,20 @@ class CallManager:
             logging.error(f"Error handling PSTN channel: {str(e)}")
 
 
-    # def handle_agent_channel(self, event):
-    #     logging.info(f"********* AGENT Channel Received Message: {event}")
-    #     channel_id = event['channel']['id'  ] 
+    def handle_agent_channel(self, event):
+        logging.info(f"********* AGENT Channel Received Message: {event}")
+        channel_id = event['channel']['id'  ] 
         
-    #     try: 
-    #         self.ari.playback(channel_id, 'beep')
-    #         # Agregar el canal originado al bridge creado arriba        
-    #         result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-    #         # if result is None or 'error' in result:
-    #         #     logging.error("Failed to add AGENT channel to bridge.")
-    #         #     return
+        try: 
+            self.ari.playback(channel_id, 'beep')
+            # Agregar el canal originado al bridge creado arriba        
+            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
+            # if result is None or 'error' in result:
+            #     logging.error("Failed to add AGENT channel to bridge.")
+            #     return
         
-    #     except Exception as e:
-    #         logging.error(f"Error handling AGENT channel: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error handling AGENT channel: {str(e)}")
 
 
     def handle_stasis_end(self, event):
