@@ -89,29 +89,36 @@ class CallManager:
             # Agregar el canal PSTN al bridge
             result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
               
+            # Publicar mensaje a RabbitMQ usando modulo rabbitmq_manager.py
+            #self.rabbitmq_manager.publish_message('Queue', f'Channel ID: {channel_id} - Camp ID: {id_camp}')
 
-            # Publicar mensaje a RabbitMQ usando el nuevo módulo
-            self.rabbitmq_manager.publish_message('Queue', f'Channel ID: {channel_id} - Camp ID: {id_camp}')
+            message_dict = {
+                'channel_id': channel_id,
+                'id_campaign': id_camp
+            }
+            message_json = json.dumps(message_dict)
+
+            self.rabbitmq_manager.publish_message('Queue', message_json)
+
             
-
         except Exception as e:
             logging.error(f"Error handling PSTN channel: {str(e)}")
 
 
-    def handle_agent_channel(self, event):
-        logging.info(f"********* AGENT Channel Received Message: {event}")
-        channel_id = event['channel']['id'  ] 
+    # def handle_agent_channel(self, event):
+    #     logging.info(f"********* AGENT Channel Received Message: {event}")
+    #     channel_id = event['channel']['id'  ] 
         
-        try: 
-            self.ari.playback(channel_id, 'beep')
-            # Agregar el canal originado al bridge creado arriba        
-            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-            # if result is None or 'error' in result:
-            #     logging.error("Failed to add AGENT channel to bridge.")
-            #     return
+    #     try: 
+    #         self.ari.playback(channel_id, 'beep')
+    #         # Agregar el canal originado al bridge creado arriba        
+    #         result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
+    #         # if result is None or 'error' in result:
+    #         #     logging.error("Failed to add AGENT channel to bridge.")
+    #         #     return
         
-        except Exception as e:
-            logging.error(f"Error handling AGENT channel: {str(e)}")
+    #     except Exception as e:
+    #         logging.error(f"Error handling AGENT channel: {str(e)}")
 
 
     def handle_stasis_end(self, event):
@@ -144,7 +151,6 @@ class CallManager:
 
 call_manager = CallManager()
 
-
 def on_message(ws, message):
     #logging.info(f"Received Message: {message}")
     event_to_dict = json.loads(message)
@@ -157,14 +163,11 @@ def on_message(ws, message):
     elif event == 'StasisEnd':
         call_manager.handle_stasis_end(event_to_dict)
 
-
 def on_error(ws, error):
     logging.info("***** ERROR *****")
 
-
 def on_close(ws, close_status_code, close_msg):
     logging.info("Closed connection")
-
 
 def on_open(ws):
     logging.info("Opened connection")
