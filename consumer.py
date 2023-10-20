@@ -20,17 +20,19 @@ def process_message(ari_client, ch, method, properties, body):
     logging.info(f"Received message: {body}")
     message_data = json.loads(body.decode("utf-8"))
 
-    channel_id = message_data.get('channel_id')
+    # Parametros del PSTN channel
+    id_channel_pstn = message_data.get('id_channel')
     id_campaign = message_data.get('id_campaign')
+    id_bridge = message_data.get('id_bridge')
 
-    logging.info(f"******* CONSUMER : *** channel_id ***: {channel_id}, *** id_campaign ***: {id_campaign}")
+    logging.info(f"******* CONSUMER : *** id_channel ***: {id_channel_pstn}, *** id_campaign ***: {id_campaign}, *** id_bridge ***: {id_bridge}")
     
-    if channel_id and id_campaign:
+    if id_channel_pstn and id_campaign:
         try:            
             # reproduzco MOH sobre el channel PSTN
-            ari_client.start_moh(channel_id)
+            ari_client.start_moh(id_channel_pstn)
   
-            app_args_str = f"{id_campaign},{channel_id}"
+            app_args_str = f"{id_campaign},{id_channel_pstn},{id_bridge}"
             ari_client.originate_channel(endpoint='PJSIP/1004', app='Deliver', appArgs=app_args_str)
 
         except Exception as e:
@@ -39,7 +41,7 @@ def process_message(ari_client, ch, method, properties, body):
             # Assuming ari_client has a close() method, if not, remove this finally block
 #            ari_client.close()
     else:
-        logging.warning("Received message missing 'channel_id' or 'id_campaign'")
+        logging.warning("Received message missing 'id_channel_pstn' or 'id_campaign'")
 
     ch.basic_ack(delivery_tag=method.delivery_tag)
 

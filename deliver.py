@@ -42,81 +42,40 @@ class CallManager:
             logging.error(f"Error setting up ARI client: {str(e)}")
             logging.error(traceback.format_exc()) 
             return None       
-
-
-    def handle_stasis_start(self, event): 
         
+
+    def handle_stasis_start(self, event):         
         try:        
             args = event.get('args', [])
-            id_camp = None 
-            if args:
-                id_camp = args[0]  # Asumiendo que "Queue" es el primer argumento
-                custom_arg = args[1] if len(args) > 1 else None  # "nombre_argumento" es el segundo argumento
+            
+            logging.info(f"Argumentos crudos recibidos: {args}")
 
-            logging.info(f"Argumentos recibidos: IDCAMP: {id_camp}")
-
-            if event.get('channel', {}).get('dialplan', {}).get('context') == 'sub-oml-campaign-3':
-                self.handle_pstn_channel(event, id_camp)                
+            # Ahora, en lugar de dividir una cadena, directamente asignamos los valores desde la lista de argumentos
+            if args and len(args) == 3:  # Si hay exactamente 3 argumentos, como esperamos
+                id_campaign, id_channel_pstn, id_bridge = args
             else:
-                self.handle_agent_channel(event)
-        except Exception as e:
-            logging.error(f"Error handling stasis start: {str(e)}")    
+                logging.error("Número incorrecto de argumentos recibidos.")
+                return  # Es importante salir aquí si los argumentos no son los que esperábamos
 
-    def handle_pstn_channel(self, event, id_camp):
-        logging.info(f"********* PSTN INBOUND Received Message: {event}")
-        channel_id = event['channel']['id'] 
-        
-        try:
-            # Creamos el bridge cuando recibimos la primera llamada desde la PSTN           
-            bridge = self.ari.create_bridge()
-            if bridge is not None and 'id' in bridge:
-                self.bridge_id = bridge.get('id')                     
-            else:
-                logging.error("Failed to create bridge or 'id' not present in the response.") 
+            logging.info(f"Argumentos recibidos: IDCAMP: {id_campaign}, ID_CHANNEL_PSTN: {id_channel_pstn}, ID_BRIDGE: {id_bridge}")
 
-            # atiendo el canal entrante
-            self.ari.answer(channel_id)        
-            
-            if not isinstance(channel_id, str):
-                logging.error(f"Unexpected type for channel_id: {type(channel_id)}")
-                return
+            channel_id = event['channel']['id']
 
-            if self.bridge_id is None:
-                logging.error("Bridge is not created")
-                return
+            # Aquí, implementarías la lógica necesaria con los argumentos extraídos.
+            try: 
+                self.ari.playback(channel_id, 'beep')
+                
+                self.ari.stop_moh(id_channel_pstn)
 
-            if not hasattr(self, "client"):
-                logging.error("self.client is not configured")
-                return
-
-            #Publicar mensaje a RabbitMQ usando modulo rabbitmq_manager.py  
-            message_dict = {
-                'id_channel': channel_id,
-                'id_campaign': id_camp,
-                'id_bridge': self.bridge_id
-            }
-            message_json = json.dumps(message_dict)
-            self.rabbitmq_manager.publish_message('Queue', message_json)            
+                # Aquí podrías necesitar usar id_bridge en lugar de self.bridge_id
+                result = self.ari.add_channel_to_bridge(id_bridge, channel_id)
+                
+            except Exception as e:
+                logging.error(f"Error handling AGENT channel: {str(e)}")
 
         except Exception as e:
-            logging.error(f"Error handling PSTN channel: {str(e)}")
-
-
-    def handle_agent_channel(self, event):
-        logging.info(f"********* AGENT Channel Received Message: {event}")
-        channel_id = event['channel']['id'  ] 
-        
-        try: 
-            self.ari.playback(channel_id, 'beep')
+            logging.error(f"Error handling stasis start: {str(e)}")
             
-            #self.ari.stop_moh(channel_id)            
-            # Agregar el canal originado al bridge creado arriba        
-            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-            
-        except Exception as e:
-            logging.error(f"Error handling AGENT channel: {str(e)}")
-
-
     def handle_stasis_end(self, event):
         channel_id = event.get('channel', {}).get('id')
         
@@ -176,7 +135,7 @@ if __name__ == "__main__":
     ASTERISK_PASS = os.getenv('ARI_PASS', 'default_pass')
     ASTERISK_HOST = os.getenv('ARI_HOST', 'asterisk')
     ASTERISK_PORT = os.getenv('ARI_PORT', '7088')
-    ASTERISK_APP = os.getenv('ASTERISK_APP', 'Queue')
+    ASTERISK_APP = os.getenv('ASTERISK_APP', 'Deliver')
 
     # Creamos la URI del WebSocket utilizando las variables
     ws_uri = f"ws://{ASTERISK_HOST}:{ASTERISK_PORT}/ari/events"
