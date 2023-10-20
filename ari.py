@@ -53,6 +53,33 @@ class ARI:
         route = f'playbacks/{playback_id}'
         return self.get(route)
 
+    def start_moh(self, channel_id, moh_class='default'):
+        route = f'channels/{channel_id}/moh'
+        if moh_class:
+            route += f'?mohClass={moh_class}'
+        try:
+            return self.post(route)
+        except HTTPError as http_err:
+            logging.error(f'HTTP error occurred: {http_err}')
+            return None
+        except Exception as err:
+            logging.error(f'An error occurred: {err}')
+            return None
+
+    def stop_moh(self, channel_id):
+        route = f'channels/{channel_id}/moh'
+        try:
+            response = self.delete(route)
+            # Aquí puedes verificar si 'response' es una instancia de la respuesta esperada
+            # y manejarla en consecuencia, como lo haces en 'start_moh'
+            return response
+        except HTTPError as http_err:
+            logging.error(f'HTTP error occurred: {http_err}')
+            return None
+        except Exception as err:
+            logging.error(f'An error occurred: {err}')
+            return None
+        
     def answer(self, channel_id):
         route = f'channels/{channel_id}/answer'
         return self.post(route)
@@ -75,33 +102,34 @@ class ARI:
         payload = {'type': bridge_type}
         return self.post(route, payload)
 
-    def add_channel_to_bridge(self, bridge_id, channel_id):
-        route = f'bridges/{bridge_id}/addChannel'
-        payload = {'channel': channel_id}
-        return self.post(route, payload)
-
-    def originate_channel(self, endpoint, app):
+    def originate_channel(self, endpoint, app, appArgs=None):  
         route = 'channels'
         payload = {
             'endpoint': endpoint,
-            # 'context': context,
-            # 'exten': exten,
-            # 'priority': priority,
-            'app': app  # reemplaza con el nombre de tu aplicación Stasis
+            'app': app
         }
+        if appArgs is not None: 
+            payload['appArgs'] = appArgs
+
         return self.post(route, payload)
 
     def hangup_channel(self, channel_id):
+        route = f'channels/{channel_id}'
         try:
-            self.channel.hangup(channel_id)
-        except HTTPError as e:
-            # Ignore 404's, since channels can go away before we get to them
-            if e.response.status_code != requests.codes.not_found:
-                raise
+            response = self.delete(route)  # Utilizando el método 'delete' de su clase
+            if response.status_code == 204:  # 204 No Content es la respuesta esperada para una operación DELETE exitosa.
+                logging.info(f"Channel {channel_id} hung up successfully.")
+                return True
+            else:
+                logging.error(f"Failed to hang up channel {channel_id}: {response.status_code}")
+                return False
+        except HTTPError as http_err:
+            logging.error(f'HTTP error occurred: {http_err}')  # Registrar el error HTTP específico
+            return False
+        except Exception as err:
+            logging.error(f'An error occurred: {err}')  # Registrar otros errores posibles
+            return False
 
-    def start_moh(self, channel):
-        channel.startMoh(route, payload)     
-        
     def get_channels_in_bridge(self, bridge_id):
         route = f'bridges/{bridge_id}'
         response = self.get(route)  # Esto podría ser un dict o un objeto requests.Response

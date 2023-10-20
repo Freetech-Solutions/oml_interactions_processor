@@ -48,7 +48,7 @@ class CallManager:
         
         try:        
             args = event.get('args', [])
-            id_camp = None  # Asignar un valor predeterminado a id_camp
+            id_camp = None 
             if args:
                 id_camp = args[0]  # Asumiendo que "Queue" es el primer argumento
                 custom_arg = args[1] if len(args) > 1 else None  # "nombre_argumento" es el segundo argumento
@@ -56,13 +56,7 @@ class CallManager:
             logging.info(f"Argumentos recibidos: IDCAMP: {id_camp}")
 
             if event.get('channel', {}).get('dialplan', {}).get('context') == 'sub-oml-campaign-3':
-                # Creamos el bridge cuando recibimos la primera llamada desde la PSTN           
-                bridge = self.ari.create_bridge()
-                if bridge is not None and 'id' in bridge:
-                    self.bridge_id = bridge.get('id') 
-                    self.handle_pstn_channel(event, id_camp)
-                else:
-                    logging.error("Failed to create bridge or 'id' not present in the response.") 
+                self.handle_pstn_channel(event, id_camp)                
             else:
                 self.handle_agent_channel(event)
         except Exception as e:
@@ -73,6 +67,14 @@ class CallManager:
         channel_id = event['channel']['id'] 
         
         try:
+            # Creamos el bridge cuando recibimos la primera llamada desde la PSTN           
+            bridge = self.ari.create_bridge()
+            if bridge is not None and 'id' in bridge:
+                self.bridge_id = bridge.get('id')                     
+            else:
+                logging.error("Failed to create bridge or 'id' not present in the response.") 
+
+            # atiendo el canal entrante
             self.ari.answer(channel_id)        
             
             if not isinstance(channel_id, str):
@@ -87,21 +89,14 @@ class CallManager:
                 logging.error("self.client is not configured")
                 return
 
-            # Agregar el canal PSTN al bridge
-            result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-              
-            # Publicar mensaje a RabbitMQ usando modulo rabbitmq_manager.py
-            #self.rabbitmq_manager.publish_message('Queue', f'Channel ID: {channel_id} - Camp ID: {id_camp}')
-
+            #Publicar mensaje a RabbitMQ usando modulo rabbitmq_manager.py  
             message_dict = {
                 'channel_id': channel_id,
                 'id_campaign': id_camp
             }
             message_json = json.dumps(message_dict)
+            self.rabbitmq_manager.publish_message('Queue', message_json)            
 
-            self.rabbitmq_manager.publish_message('Queue', message_json)
-
-            
         except Exception as e:
             logging.error(f"Error handling PSTN channel: {str(e)}")
 
@@ -112,12 +107,11 @@ class CallManager:
         
         try: 
             self.ari.playback(channel_id, 'beep')
+            
+            #self.ari.stop_moh(channel_id)            
             # Agregar el canal originado al bridge creado arriba        
             result = self.ari.add_channel_to_bridge(self.bridge_id, channel_id)
-            # if result is None or 'error' in result:
-            #     logging.error("Failed to add AGENT channel to bridge.")
-            #     return
-        
+            
         except Exception as e:
             logging.error(f"Error handling AGENT channel: {str(e)}")
 

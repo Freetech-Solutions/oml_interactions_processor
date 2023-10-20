@@ -23,12 +23,15 @@ def process_message(ari_client, ch, method, properties, body):
     channel_id = message_data.get('channel_id')
     id_campaign = message_data.get('id_campaign')
 
-    logging.info(f"*** channel_id ***: {channel_id}, *** id_campaign ***: {id_campaign}")
+    logging.info(f"******* CONSUMER : *** channel_id ***: {channel_id}, *** id_campaign ***: {id_campaign}")
     
     if channel_id and id_campaign:
-        try:
-            ari_client.originate_channel(endpoint='PJSIP/1004', app='Queue')
-            #ari_client.add_channel_to_bridge(bridge_id, channel_id)
+        try:            
+            # reproduzco MOH sobre el channel PSTN
+            ari_client.start_moh(channel_id)
+  
+            app_args_str = f"{id_campaign},{channel_id}"
+            ari_client.originate_channel(endpoint='PJSIP/1004', app='Deliver', appArgs=app_args_str)
 
         except Exception as e:
             logging.error(f"Failed to originate call: {e}")
