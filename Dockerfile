@@ -1,8 +1,14 @@
-FROM python:3.10-alpine as run
+FROM python:3.10-alpine as build
 
-RUN apk add --no-cache bash
 WORKDIR /app
-COPY fastagi.py requirements.txt /app/
+
+COPY requirements.txt /app/
 RUN pip install -r ./requirements.txt
 
-CMD ["python", "fastagi.py"]
+FROM python:3.10-alpine as run
+
+WORKDIR /app
+COPY --from=build /app /app
+COPY --from=build /usr/local /usr/local
+COPY ari.py rabbitmq_manager.py app_queue.py fastagi.py /app/
+RUN chmod +x /app/app_queue.py /app/fastagi.py

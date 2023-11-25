@@ -183,13 +183,6 @@ class FastAGIServer(threading.Thread):
             cursor.close()
             conn.close()
 
-        # Insert to Redis for Realtime KPIs
-        # call_direction = 'UNKNOWN'
-
-        # if tipo_llamada in ['1','2','4','5']:
-        #     call_direction = 'OUTBOUND'
-        # elif tipo_llamada == 3:
-        #     call_direction = 'OUTBOUND'
         redis_key_camp = f'OML:REALTIME:CAMP:{campana_id}'        
         field_campana = f'CALL_TYPE:{tipo_llamada}:{event}'
         self.event_camp_sum(redis_key_camp, field_campana)

@@ -1,9 +1,9 @@
 # Release Notes
-2023-10-01
+2023-11-25
 
 ## Added
 
-* oml-304 Call day statistics stored in a Redis hash for real-time web views
+* oml-414 [BUILD] In the build stage, it's possible to discern between registry containers based on the branch type.
 
 ## Changed
 
