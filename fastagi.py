@@ -105,9 +105,9 @@ class FastAGIServer(threading.Thread):
 #   AGIs OML
 # -------------------------------------------------------------------------------------
 
-    def write_time_stderr(message):
+    
+    def write_time_stderr(self, message):
         root_logger.error(message)
-
 
     # ---- OML call logger postgres reportes_app_llamadalog ----
     # ---- OML call logger postgres reportes_app_llamadalog ----
@@ -339,18 +339,27 @@ class FastAGIServer(threading.Thread):
     # -- Survey Addon insert DTMF on Redis ----
     def omni_survey_answer(self, agi, *args, **kwargs):
         redis_connection = redis.Redis(
-            host=os.getenv('REDIS_HOSTNAME'),
+            host=os.getenv('REDIS_HOSTNAME', 'localhost'),
             port=6379,
             decode_responses=True
         )
 
-        data = json.dumps(args[0][1:10])  # Aquí se ajusta para obtener los argumentos
+        if args and len(args[0]) == 9:
+            data = json.dumps(args[0][0:9])
+        else:
+            self.write_time_stderr("Error: Argumentos inesperados en omni_survey_answer")
+            return
+
+        #data = json.dumps(sys.argv[1:10])
         family_key = 'OML:QUEUE:SURVEY_ANSWERS'
+
+        root_logger.info(data)
 
         try:
             family_data = redis_connection.rpush(family_key, data)
+            # Considera manejar 'family_data' si es necesario
         except redis.exceptions.RedisError as e:
-            self.write_time_stderr("Error executing redis command RPUSH: {0}".format(e))
+            self.write_time_stderr(f"Error executing redis command RPUSH: {e}")
 
 
     def kill(self):

@@ -1,18 +1,16 @@
 # Release Notes
-2023-11-25
+2023-12-01
 
 ## Added
 
-* oml-414 [BUILD] In the build stage, it's possible to discern between registry containers based on the branch type.
 
 ## Changed
 
-No changes in this release.
 
 ## Fixed
 
-No fixes in this release.
+* oml-385 Fix cx-survey addon function
 
 ## Removed
 
-No removals in this release.
+
