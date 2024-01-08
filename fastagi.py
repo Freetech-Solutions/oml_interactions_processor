@@ -35,7 +35,9 @@ class FastAGIServer(threading.Thread):
         threading.Thread.__init__(self)
         self.daemon = True
 
-        self._fagi_server = pystrix.agi.FastAGIServer(interface='0.0.0.0')
+        interface = os.environ.get('FASTAGI_HOSTNAME', '0.0.0.0')
+
+        self._fagi_server = pystrix.agi.FastAGIServer(interface=interface)
 
         self._fagi_server.register_script_handler(
             re.compile('variables'), self.variables)
@@ -183,15 +185,18 @@ class FastAGIServer(threading.Thread):
             cursor.close()
             conn.close()
 
-        redis_key_camp = f'OML:REALTIME:CAMP:{campana_id}'        
+        redis_key_camp = f'OML:CALLDATA:CAMP:{campana_id}'        
         field_campana = f'CALL_TYPE:{tipo_llamada}:{event}'
         self.event_camp_sum(redis_key_camp, field_campana)
 
-        redis_key_agent = f'OML:REALTIME:AGENT:{agente_id}'
+        redis_key_agent = f'OML:CALLDATA:AGENT:{agente_id}'
         field_agent = f'CALL_TYPE:{tipo_llamada}:{event}'
         self.event_agent_sum(redis_key_agent, field_agent, event)
         
-    # Redis INCRDB 
+        redis_key_wait_time = f'OML:CALLDATA:WAIT-TIME:CAMP:{campana_id}'
+        self.event_camp_queue_wait_time(redis_key_wait_time, bridge_wait_time, event)
+
+    # Redis events CAMP INCRDB 
     def event_camp_sum(self, redis_key, field):
         try:
             redis_connection = redis.Redis(
@@ -206,6 +211,7 @@ class FastAGIServer(threading.Thread):
         except Exception as ex:
             print(f"Error inesperado: {ex}")
 
+    # Redis events AGENT INCRDB 
     def event_agent_sum(self, redis_key, field, event):
         try:
             redis_connection = redis.Redis(
@@ -224,6 +230,24 @@ class FastAGIServer(threading.Thread):
         except Exception as ex:
             print(f"Error inesperado: {ex}")
 
+    # Redis Queue wait-time
+    def event_camp_queue_wait_time(self, redis_key, wait_time, event):
+        try:
+            redis_connection = redis.Redis(
+                host=os.getenv('REDIS_HOSTNAME'),
+                port=6379,
+                db=2,
+                decode_responses=True
+            )
+ 
+            if event in ["CONNECT", "ABANDON"]:                        
+                redis_connection.rpush(redis_key, wait_time)
+            else:
+                print("nothing")
+        except redis.exceptions.RedisError as e:
+            print(f"Error al incrementar el valor en Redis: {e}")
+        except Exception as ex:
+            print(f"Error inesperado: {ex}")
 
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
