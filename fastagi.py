@@ -111,47 +111,36 @@ class FastAGIServer(threading.Thread):
     def write_time_stderr(self, message):
         root_logger.error(message)
 
+    def get_date(self, formato="%Y-%m-%d %H:%M:%S"):
+        time_zone = os.getenv('TZ', 'UTC')
+        tz = pytz.timezone(time_zone)
+        now = datetime.datetime.now(tz)
+        return now.strftime(formato)
+    
+    def get_redis_connection(self, db=0):    
+        return redis.Redis(
+            host=os.getenv('REDIS_HOSTNAME', 'redis'),
+            port=int(os.getenv('REDIS_PORT', 6379)),
+            db=db,
+            decode_responses=True
+    )
     # ---- OML call logger postgres reportes_app_llamadalog ----
     # ---- OML call logger postgres reportes_app_llamadalog ----
     def omni_logger_conf(self, agi, *args, **kwargs):
-        POSTGRES_HOST = os.getenv('PGHOST')
-        POSTGRES_PORT = os.getenv('PGPORT')
-        POSTGRES_DB = os.getenv('PGDATABASE')
-        POSTGRES_USER = os.getenv('PGUSER')
-        POSTGRES_PASS = os.getenv('PGPASSWORD')
-
-        conn = psycopg2.connect(
-            host=POSTGRES_HOST,
-            port=POSTGRES_PORT,
-            dbname=POSTGRES_DB,
-            user=POSTGRES_USER,
-            password=POSTGRES_PASS
-        )
-        cursor = conn.cursor()
-
         arguments = args[0]
-        
-        tz_variable = os.environ.get('TZ')
 
         if len(arguments) < 14:
             self.write_time_stderr('Error: No se proporcionaron suficientes argumentos\n')
             return
 
-        if tz_variable:
-            local_tz = pytz.timezone(tz_variable)
-        else:
-            local_tz = pytz.timezone('UTC')
-
         campana_id, callid, agente_id, event, numero_marcado, contacto_id, tipo_llamada, \
         tipo_campana, bridge_wait_time, duracion_llamada, archivo_grabacion, agente_extra_id, \
-        campana_extra_id, numero_extra = arguments
-
-        now = datetime.datetime.now(local_tz)
-        #now = datetime.datetime.utcnow()
-        now_formatted = now.strftime("%Y-%m-%d %H:%M:%S")
+        campana_extra_id, numero_extra = arguments                
+        
+        date_formatted = self.get_date()
 
         llamadalog_dict = {
-            'time': now_formatted,
+            'time': date_formatted,
             'callid': callid,
             'campana_id': campana_id,
             'tipo_campana': tipo_campana,
@@ -168,22 +157,32 @@ class FastAGIServer(threading.Thread):
             'numero_extra': numero_extra
         }
 
-        # Insert to Postgres for history KPIs
-        insert_query = sql.SQL(
-            'INSERT INTO reportes_app_llamadalog ({}) VALUES ({})'
-        ).format(
-            sql.SQL(',').join(map(sql.Identifier, llamadalog_dict.keys())),
-            sql.SQL(',').join(map(sql.Placeholder, llamadalog_dict.keys()))
-        )
-
         try:
+            conn = psycopg2.connect(
+                host=os.getenv('PGHOST'),
+                port=os.getenv('PGPORT'),
+                dbname=os.getenv('PGDATABASE'),
+                user=os.getenv('PGUSER'),
+                password=os.getenv('PGPASSWORD')
+            )
+            cursor = conn.cursor()
+
+            insert_query = sql.SQL(
+                'INSERT INTO reportes_app_llamadalog ({}) VALUES ({})'
+            ).format(
+                sql.SQL(',').join(map(sql.Identifier, llamadalog_dict.keys())),
+                sql.SQL(',').join(map(sql.Placeholder, llamadalog_dict.keys()))
+            )
+
             cursor.execute(insert_query, llamadalog_dict)
             conn.commit()
         except Exception as e:
             self.write_time_stderr(f'Error due to: {e}\n')
         finally:
-            cursor.close()
-            conn.close()
+            if cursor:
+                cursor.close()
+            if conn:
+                conn.close()
 
         redis_key_camp = f'OML:CALLDATA:CAMP:{campana_id}'        
         field_campana = f'CALL_TYPE:{tipo_llamada}:{event}'
@@ -199,36 +198,27 @@ class FastAGIServer(threading.Thread):
     # Redis events CAMP INCRDB 
     def event_camp_sum(self, redis_key, field):
         try:
-            redis_connection = redis.Redis(
-                host=os.getenv('REDIS_HOSTNAME'),
-                port=6379,
-                db=2,
-                decode_responses=True
-            )
+            redis_connection = self.get_redis_connection(db=2)
             redis_connection.hincrby(redis_key, field, 1)
         except redis.exceptions.RedisError as e:
-            print(f"Error al incrementar el valor en Redis: {e}")
-        except Exception as ex:
-            print(f"Error inesperado: {ex}")
+            self.write_time_stderr(f"Redis camp_sum error: {e}")
 
     # Redis events AGENT INCRDB 
     def event_agent_sum(self, redis_key, field, event):
         try:
-            redis_connection = redis.Redis(
-                host=os.getenv('REDIS_HOSTNAME'),
-                port=6379,
-                db=2,
-                decode_responses=True
-            )
- 
-            if event in ["ANSWER", "CONNECT", "RINGNOANSWER", "DIAL"]:
+            redis_connection = self.get_redis_connection(db=2)
+            if event in ["ANSWER", "CONNECT", "RINGNOANSWER", "DIAL", "CANCEL", "CONGESTION"]:
                 redis_connection.hincrby(redis_key, field, 1)
-            else:
-                print("nothing")
         except redis.exceptions.RedisError as e:
-            print(f"Error al incrementar el valor en Redis: {e}")
-        except Exception as ex:
-            print(f"Error inesperado: {ex}")
+            self.write_time_stderr(f"Redis agent_sum error: {e}")
+
+    def event_camp_queue_wait_time(self, redis_key, wait_time, event):
+        try:
+            redis_connection = self.get_redis_connection(db=2)
+            if event in ["CONNECT", "ABANDON"]:
+                redis_connection.rpush(redis_key, wait_time)
+        except redis.exceptions.RedisError as e:
+            self.write_time_stderr(f"Redis event_queue error: {e}")
 
     # Redis Queue wait-time
     def event_camp_queue_wait_time(self, redis_key, wait_time, event):
@@ -252,63 +242,54 @@ class FastAGIServer(threading.Thread):
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
     def omni_retrieve_conf(self, agi, *args, **kwargs):
-
         arguments = args[0]
         
-        family_type = arguments[0]
-        item_id = arguments[1]
+        if len(arguments) < 2:
+            self.write_time_stderr("Error: Insufficient arguments provided")
+            return
 
-        redis_connection = redis.Redis(
-            host=os.getenv('REDIS_HOSTNAME'),
-            port=6379,
-            decode_responses=True
-        )
-
+        family_type, item_id = arguments[:2]
         family_key = f'OML:{family_type}:{item_id}'
+
+        redis_connection = self.get_redis_connection(db=0)
 
         try:
             family_data = redis_connection.hgetall(family_key)
-        except redis.exceptions.RedisError as e:
-            write_time_stderr(f"Error executing Redis command HGETALL: {e}")
-        else:
-            if family_data:
-                for key, value in family_data.items():
-                    variable_name = f'__OML{family_type}{key}'
-                    try:
-                        agi.execute(pystrix.agi.core.SetVariable(variable_name, value))
-                    except Exception as e:
-                        write_time_stderr(f"Unable to set variable in channel due to {e}")
-                        raise e
-            else:
-                write_time_stderr(f"Unable to get Family DATA for {family_key}")
+            if not family_data:
+                self.write_time_stderr(f"Unable to get Family DATA for {family_key}")
+                return
 
+            for key, value in family_data.items():
+                variable_name = f'__OML{family_type}{key}'
+                agi.execute(pystrix.agi.core.SetVariable(variable_name, value))
+        except redis.exceptions.RedisError as e:
+            self.write_time_stderr(f"Error executing Redis command HGETALL for {family_key}: {e}")
+        except Exception as e:
+            self.write_time_stderr(f"Unable to set variable in channel due to {e}")
+            raise e
 
 
     # --- Blacklist check if number is on the blacklist REDIS ---
     # --- Blacklist check if number is on the blacklist REDIS ---
     def omni_blacklist(self, agi, *args, **kwargs):
-        
-        arguments = args[0]
-        phone_number = arguments[0]
+        if len(args[0]) < 1:  # Verifica que al menos un argumento ha sido proporcionado
+            self.write_time_stderr("Error: No phone number provided")
+            return
 
+        phone_number = args[0][0]
         black_list_key = 'OML:BLACKLIST'
-        redis_connection = redis.Redis(
-            host=os.getenv('REDIS_HOSTNAME'),
-            port=6379,
-            decode_responses=True
-        )
+        redis_connection = self.get_redis_connection()
 
         try:
             is_black_listed = int(redis_connection.sismember(black_list_key, phone_number))
         except redis.exceptions.RedisError as e:
-            write_time_stderr("Error executing Redis command SISMEMBER: {0}".format(e))
-            # Si falla el servicio, devuelve código de error
-            is_black_listed = BLACKLIST_ERROR_CODE
+            self.write_time_stderr(f"Error executing Redis command SISMEMBER: {e}")
+            is_black_listed = self.BLACKLIST_ERROR_CODE
 
         try:
             agi.execute(pystrix.agi.core.SetVariable('BLACKLIST', str(is_black_listed)))
         except Exception as e:
-            write_time_stderr("Unable to set variable BLACKLIST in channel due to {0}".format(e))
+            self.write_time_stderr(f"Unable to set variable BLACKLIST in channel due to {e}")
             raise e
 
 
@@ -316,35 +297,31 @@ class FastAGIServer(threading.Thread):
     # --- Set agent status ONCALL ---
     def omni_agent_status(self, agi, *args, **kwargs):
         arguments = args[0]
+        if len(arguments) < 2:
+            self.write_time_stderr("Error: Insufficient arguments provided")
+            return
+
         command = arguments[0]
         agent_id = arguments[1]
         agent_key = 'OML:AGENT:' + agent_id
 
-        redis_connection = redis.Redis(
-            host=os.getenv('REDIS_HOSTNAME'),
-            port=6379,
-            decode_responses=True
-        )
+        redis_connection = self.get_redis_connection()
 
         if command not in ['GET', 'SET']:
-            write_time_stderr("Unknown command {0}".format(command))
+            self.write_time_stderr(f"Unknown command {command}")
         elif command == 'GET':
             try:
                 agent_data = redis_connection.hgetall(agent_key)
+                if not agent_data:
+                    self.write_time_stderr(f"Unable to get Agent DATA for {agent_key}")
+                    return
+
+                # Configurar variables en el canal Asterisk AGI
+                for var_name, var_value in agent_data.items():
+                    agi_variable = '__OMLAGENT' + var_name.upper()
+                    agi.execute(pystrix.agi.core.SetVariable(agi_variable, var_value))
             except redis.exceptions.RedisError as e:
-                write_time_stderr("Error executing Redis command HGETALL: {0}".format(e))
-            else:
-                if agent_data:
-                    try:
-                        agi.execute(pystrix.agi.core.SetVariable('__OMLAGENTNAME', agent_data['NAME']))
-                        agi.execute(pystrix.agi.core.SetVariable('OMLAGENTSIP', agent_data['SIP']))
-                        agi.execute(pystrix.agi.core.SetVariable('OMLAGENTSTATUS', agent_data['STATUS']))
-                        agi.execute(pystrix.agi.core.SetVariable('PAUSE_ID', agent_data.get('PAUSE_ID', '')))
-                    except Exception as e:
-                        write_time_stderr("Unable to set variable in channel due to {0}".format(e))
-                        raise e
-                else:
-                    write_time_stderr("Unable to get Agent DATA for {0}".format(agent_key))
+                self.write_time_stderr(f"Error executing Redis command HGETALL: {e}")
         elif command == 'SET':
             data = {
                 'STATUS': arguments[2],
@@ -353,37 +330,29 @@ class FastAGIServer(threading.Thread):
                 'CONTACT_NUMBER': arguments[5] if len(arguments) >= 6 else '',
             }
             try:
-                agent_data = redis_connection.hset(agent_key, mapping=data)
+                redis_connection.hset(agent_key, mapping=data)
             except redis.exceptions.RedisError as e:
-                write_time_stderr("Error executing Redis command SET: {0}".format(e))
-                # Here you can decide how to handle the error when executing the SET command in Redis
+                self.write_time_stderr(f"Error executing Redis command SET: {e}")
 
 
     # -- Survey Addon insert DTMF on Redis ----
     # -- Survey Addon insert DTMF on Redis ----
     def omni_survey_answer(self, agi, *args, **kwargs):
-        redis_connection = redis.Redis(
-            host=os.getenv('REDIS_HOSTNAME', 'localhost'),
-            port=6379,
-            decode_responses=True
-        )
-
-        if args and len(args[0]) == 9:
-            data = json.dumps(args[0][0:9])
-        else:
-            self.write_time_stderr("Error: Argumentos inesperados en omni_survey_answer")
+        if not args or len(args[0]) != 9:
+            self.write_time_stderr("Error: Argumentos inesperados en omni_survey_answer. Se esperaban 9 argumentos.")
             return
 
-        #data = json.dumps(sys.argv[1:10])
+        # Preparar los datos para ser almacenados en Redis
+        data = json.dumps(args[0][0:9])
         family_key = 'OML:QUEUE:SURVEY_ANSWERS'
 
-        root_logger.info(data)
+        redis_connection = self.get_redis_connection()
 
         try:
-            family_data = redis_connection.rpush(family_key, data)
-            # Considera manejar 'family_data' si es necesario
+            redis_connection.rpush(family_key, data)
+            root_logger.info(f"Datos de encuesta almacenados correctamente: {data}")
         except redis.exceptions.RedisError as e:
-            self.write_time_stderr(f"Error executing redis command RPUSH: {e}")
+            self.write_time_stderr(f"Error al ejecutar el comando RPUSH en Redis: {e}")
 
 
     def kill(self):
