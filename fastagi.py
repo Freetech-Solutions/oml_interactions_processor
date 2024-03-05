@@ -220,6 +220,24 @@ class FastAGIServer(threading.Thread):
         except redis.exceptions.RedisError as e:
             self.write_time_stderr(f"Redis event_queue error: {e}")
 
+    # Redis Queue wait-time
+    def event_camp_queue_wait_time(self, redis_key, wait_time, event):
+        try:
+            redis_connection = redis.Redis(
+                host=os.getenv('REDIS_HOSTNAME'),
+                port=6379,
+                db=2,
+                decode_responses=True
+            )
+ 
+            if event in ["CONNECT", "ABANDON"]:                        
+                redis_connection.rpush(redis_key, wait_time)
+            else:
+                print("nothing")
+        except redis.exceptions.RedisError as e:
+            print(f"Error al incrementar el valor en Redis: {e}")
+        except Exception as ex:
+            print(f"Error inesperado: {ex}")
 
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
     # --- Retrieve config from Redis and Set chanvars in order to pass to the dialplan ---
