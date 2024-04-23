@@ -72,12 +72,13 @@ def remove_silence(source_path):
     output_path = source_path.replace('.wav', '-nosilence.wav')
     command = ['sox', source_path, output_path, 'silence', '1', '0.1', '1%', 'reverse', 'silence', '1', '0.1', '1%', 'reverse']
     try:
-        subprocess.run(command, check=True)
+        subprocess.run(command, check=True, capture_output=True)  # Modificado para capturar la salida
+        logging.info(f"Silence removed from {source_path}, saved to {output_path}")
         os.remove(source_path)  # Eliminar el archivo original
         return output_path
     except subprocess.CalledProcessError as e:
-        logging.error("Error al quitar los silencios: %s", e)
-        return source_path  # En caso de error, retorna el path original
+        logging.error(f"Error al quitar los silencios: {e.stderr.decode()}")  # Log detallado del error
+        return source_path
     
 def upload_to_s3(source_path, destination_path):
     metadata = {'convert': 'yes', 'transcribe': 'yes'}
@@ -112,11 +113,13 @@ def move_file_to_s3(source_file, date_dialplan, split_channels):
         for suffix in ['-Rx', '-Tx']:
             channel_file = f"{base}{suffix}{ext}"
             channel_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{channel_file}"
+            logging.info(f"Editing silence for transcription channel: {channel_file}")
             no_silence_path = remove_silence(channel_path)
+            
             channel_mp3_file = f"{base}{suffix}.mp3"
             channel_mp3_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{channel_mp3_file}"
-
-            convert_to_mp3(no_silence_path, channel_mp3_path)
+            convert_to_mp3(no_silence_path, channel_mp3_path)  # Asegura que el path sin silencio es convertido a MP3
+            
             channel_destination_path = f"{date_dialplan}/{channel_mp3_file}"
             upload_to_s3(channel_mp3_path, channel_destination_path)
             os.remove(no_silence_path)
