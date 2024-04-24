@@ -36,105 +36,98 @@ rabbitmq_queue = 'callrec_processor'
 
 # Configuración de AWS S3
 s3_bucket_name = os.getenv("S3_BUCKET_NAME")
-s3_endpoint = os.getenv("S3_ENDPOINT")
-storage_type = os.getenv('CALLREC_DEVICE')
-aws_access_key_id = os.environ.get("AWS_ACCESS_KEY_ID") or None
-aws_secret_access_key = os.environ.get("AWS_SECRET_ACCESS_KEY") or None
-endpoint_url = os.environ.get("S3_ENDPOINT") or None
-region_name = os.environ.get("S3_REGION_NAME") or 'us-east-1'
+aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
+aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+endpoint_url = os.getenv("S3_ENDPOINT", None)  # Uso de None como default
+region_name = os.getenv("S3_REGION_NAME", 'us-east-1')
+storage_type = os.getenv('CALLREC_DEVICE', 's3-aws')
 
-if storage_type == 's3-aws':
-    s3 = boto3.client('s3', region_name)
-elif storage_type == 's3-no-check-cert':
-    s3 = boto3.client(
-        's3',
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key,
-        endpoint_url=endpoint_url,
-        verify=False)
-else:
-    s3 = boto3.client(
-        's3',
-        aws_access_key_id=aws_access_key_id,
-        aws_secret_access_key=aws_secret_access_key,
-        endpoint_url=endpoint_url)
+# Configuración del cliente S3 basada en el tipo de almacenamiento
+s3 = boto3.client(
+    's3',
+    region_name=region_name,
+    aws_access_key_id=aws_access_key_id,
+    aws_secret_access_key=aws_secret_access_key,
+    endpoint_url=endpoint_url,
+    verify=(storage_type != 's3-no-check-cert')
+)
 
 def convert_to_mp3(source_path, mp3_path):
-    command = ['ffmpeg', '-i', source_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path]
     try:
-        subprocess.run(command, check=True)
-    except subprocess.CalledProcessError:
-        logging.info("Failed to convert to MP3")
-        exit(1)
+        subprocess.run(['ffmpeg', '-i', source_path, '-codec:a', 'libmp3lame', '-qscale:a', '2', mp3_path], check=True)
+    except subprocess.CalledProcessError as e:
+        logging.error(f"Failed to convert to MP3: {e}")
+        return False
+    return True
 
 def remove_silence(source_path):
-    """Utiliza SoX para quitar los silencios del archivo de audio."""
-    output_path = source_path.replace('.wav', '-nosilence.wav')
-    command = ['sox', source_path, output_path, 'silence', '1', '0.1', '1%', 'reverse', 'silence', '1', '0.1', '1%', 'reverse']
+    """Elimina los silencios innecesarios de un archivo de audio de canal telefónico."""
+    output_path = source_path.replace('.wav', '-trimmed.wav')
+    command = [
+        'sox', 
+        source_path, 
+        output_path, 
+        'silence', '-l', 
+        '1', '0.7', '3%',  
+        '-1', '0.7', '3%' 
+    ]
     try:
-        subprocess.run(command, check=True, capture_output=True)  # Modificado para capturar la salida
-        logging.info(f"Silence removed from {source_path}, saved to {output_path}")
-        os.remove(source_path)  # Eliminar el archivo original
+        subprocess.run(command, check=True)
+        logging.info(f"Silencios eliminados de {source_path}, guardado en {output_path}")
+        os.remove(source_path)  # Opcionalmente eliminar el archivo original
         return output_path
     except subprocess.CalledProcessError as e:
-        logging.error(f"Error al quitar los silencios: {e.stderr.decode()}")  # Log detallado del error
+        logging.error(f"Error al quitar silencios: {e.stderr.decode()}")
         return source_path
-    
-def upload_to_s3(source_path, destination_path):
-    metadata = {'convert': 'yes', 'transcribe': 'yes'}
-    try:
-        s3.upload_file(source_path, s3_bucket_name, destination_path, ExtraArgs={'Metadata': metadata})
-    except NoCredentialsError:
-        logging.info("No se encontraron las credenciales de AWS.")
-        exit(1)
 
-def move_file_to_s3(source_file, date_dialplan, split_channels):
+def upload_to_s3(source_path, destination_path):
+    try:
+        s3.upload_file(source_path, s3_bucket_name, destination_path, ExtraArgs={'Metadata': {'convert': 'yes', 'transcribe': 'yes'}})
+    except NoCredentialsError:
+        logging.error("AWS credentials not found.")
+        return False
+    return True
+
+def process_audio_file(source_file, date_dialplan, process_split=False):
     source_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{source_file}"
+    if not os.path.exists(source_path):
+        logging.error(f"File not found: {source_path}")
+        return
+    
     base, ext = os.path.splitext(source_file)
     mp3_file = f"{base}.mp3"
     mp3_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{mp3_file}"
-    
-    logging.info(f'archivo original: {source_path}')
-    logging.info(f'archivo mp3: {mp3_path}')
 
-    convert_to_mp3(source_path, mp3_path)
-    
-    destination_path = f"{date_dialplan}/{mp3_file}"
-    upload_to_s3(mp3_path, destination_path)
-    
-    logging.info(f'Delete local files')
-    os.remove(source_path)
-    os.remove(mp3_path)
+    logging.info(f'Processing original audio: {source_path}')
+    if convert_to_mp3(source_path, mp3_path) and upload_to_s3(mp3_path, f"{date_dialplan}/{mp3_file}"):
+        os.remove(mp3_path)
 
-    logging.info(f'Split channels ? {split_channels}')
-
-    if split_channels:
-        logging.info("Processing split channels for Rx and Tx.")
+    if process_split:
         for suffix in ['-Rx', '-Tx']:
             channel_file = f"{base}{suffix}{ext}"
             channel_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{channel_file}"
-            logging.info(f"Editing silence for transcription channel: {channel_file}")
             no_silence_path = remove_silence(channel_path)
-            
+
             channel_mp3_file = f"{base}{suffix}.mp3"
             channel_mp3_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{channel_mp3_file}"
-            convert_to_mp3(no_silence_path, channel_mp3_path)  # Asegura que el path sin silencio es convertido a MP3
-            
-            channel_destination_path = f"{date_dialplan}/{channel_mp3_file}"
-            upload_to_s3(channel_mp3_path, channel_destination_path)
-            os.remove(no_silence_path)
-            os.remove(channel_mp3_path)
 
-def callback(ch, method, properties, body):        
+            if convert_to_mp3(no_silence_path, channel_mp3_path):
+                if upload_to_s3(channel_mp3_path, f"{date_dialplan}/{channel_mp3_file}"):
+                    os.remove(channel_mp3_path)
+                os.remove(no_silence_path)
+
+def callback(ch, method, properties, body):
     logging.info("Mensaje recibido desde RabbitMQ.")
 
     message = json.loads(body)
     file_name = message['fileName']
     date_file_name = message['dateFileName']
-    split_channels = message.get('splitChannels', 'False') == 'True' 
+    split_channels = message.get('splitChannels', 'False') == 'True'
 
-    # Ajustar para usar la nueva función que maneja la subida y la lógica de bifurcación
-    move_file_to_s3(file_name, date_file_name, split_channels)
+    if split_channels == True:
+        process_audio_file(file_name, date_file_name, process_split=True)
+    else:
+        process_audio_file(file_name, date_file_name)
 
     # Enviar acuse de recibo
     ch.basic_ack(delivery_tag=method.delivery_tag)
@@ -145,7 +138,7 @@ def consume():
     channel.queue_declare(queue=rabbitmq_queue, durable=True)
     channel.basic_qos(prefetch_count=1)
     channel.basic_consume(queue=rabbitmq_queue, on_message_callback=callback)
-    logging.info('Consumer ready. For quick press CTRL+C.')
+    logging.info('Consumer ready. To exit, press CTRL+C.')
     channel.start_consuming()
 
 if __name__ == "__main__":
