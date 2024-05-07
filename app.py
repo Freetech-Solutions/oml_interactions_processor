@@ -126,11 +126,15 @@ def callback(ch, method, properties, body):
     date_file_name = message['dateFileName']
     split_channels = message.get('splitChannels', 'False') == 'True'
 
+<<<<<<< HEAD
     if split_channels == True:
         process_audio_file(file_name, date_file_name, process_split=True)
     else:
         process_audio_file(file_name, date_file_name)
 
+=======
+    process_audio_file(file_name, date_file_name, process_split=split_channels)
+>>>>>>> 58b2b34 (fix)
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
 def consume():
