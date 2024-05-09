@@ -26,3 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg sox \
 
 WORKDIR /app
 COPY app.py /app/
+
+RUN useradd -M -u 1000 omnileads
+RUN chown -R omnileads.omnileads /app
