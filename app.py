@@ -25,7 +25,7 @@ import pika
 import boto3
 import subprocess
 import logging
-from botocore.exceptions import NoCredentialsError
+from botocore.exceptions import NoCredentialsError, ClientError
 
 # Configura el logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -38,19 +38,23 @@ rabbitmq_queue = 'callrec_processor'
 s3_bucket_name = os.getenv("S3_BUCKET_NAME")
 aws_access_key_id = os.getenv("AWS_ACCESS_KEY_ID")
 aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
-endpoint_url = os.getenv("S3_ENDPOINT", None)  # Uso de None como default
+endpoint_url = os.getenv("S3_ENDPOINT", None)
 region_name = os.getenv("S3_REGION_NAME", 'us-east-1')
 storage_type = os.getenv('CALLREC_DEVICE', 's3-aws')
 
 # Configuración del cliente S3 basada en el tipo de almacenamiento
-s3 = boto3.client(
-    's3',
-    region_name=region_name,
-    aws_access_key_id=aws_access_key_id,
-    aws_secret_access_key=aws_secret_access_key,
-    endpoint_url=endpoint_url,
-    verify=(storage_type != 's3-no-check-cert')
-)
+try:
+    s3 = boto3.client(
+        's3',
+        region_name=region_name if storage_type == 's3-aws' else None,
+        aws_access_key_id=aws_access_key_id,
+        aws_secret_access_key=aws_secret_access_key,
+        endpoint_url=endpoint_url if storage_type != 's3-aws' else None,
+        verify=(storage_type != 's3-no-check-cert')
+    )
+except Exception as e:
+    logging.error(f"Failed to initialize S3 client: {e}")
+    exit(1)
 
 def convert_to_mp3(source_path, mp3_path):
     try:
@@ -61,7 +65,6 @@ def convert_to_mp3(source_path, mp3_path):
     return True
 
 def remove_silence(source_path):
-    """Elimina los silencios innecesarios de un archivo de audio de canal telefónico."""
     output_path = source_path.replace('.wav', '-trimmed.wav')
     command = [
         'sox', 
@@ -74,17 +77,17 @@ def remove_silence(source_path):
     try:
         subprocess.run(command, check=True)
         logging.info(f"Silencios eliminados de {source_path}, guardado en {output_path}")
-        os.remove(source_path)  # Opcionalmente eliminar el archivo original
+        os.remove(source_path)
         return output_path
     except subprocess.CalledProcessError as e:
-        logging.error(f"Error al quitar silencios: {e.stderr.decode()}")
+        logging.error(f"Error al quitar silencios: {e}")
         return source_path
 
 def upload_to_s3(source_path, destination_path):
-    try:
+    try: 
         s3.upload_file(source_path, s3_bucket_name, destination_path, ExtraArgs={'Metadata': {'convert': 'yes', 'transcribe': 'yes'}})
-    except NoCredentialsError:
-        logging.error("AWS credentials not found.")
+    except (NoCredentialsError, ClientError) as e:
+        logging.error(f"Error uploading to S3: {e}")
         return False
     return True
 
@@ -101,6 +104,7 @@ def process_audio_file(source_file, date_dialplan, process_split=False):
     logging.info(f'Processing original audio: {source_path}')
     if convert_to_mp3(source_path, mp3_path) and upload_to_s3(mp3_path, f"{date_dialplan}/{mp3_file}"):
         os.remove(mp3_path)
+        os.remove(source_path)  # Removing original WAV file after successful conversion and upload
 
     if process_split:
         for suffix in ['-Rx', '-Tx']:
@@ -111,14 +115,12 @@ def process_audio_file(source_file, date_dialplan, process_split=False):
             channel_mp3_file = f"{base}{suffix}.mp3"
             channel_mp3_path = f"/var/spool/asterisk/monitor/{date_dialplan}/{channel_mp3_file}"
 
-            if convert_to_mp3(no_silence_path, channel_mp3_path):
-                if upload_to_s3(channel_mp3_path, f"{date_dialplan}/{channel_mp3_file}"):
-                    os.remove(channel_mp3_path)
+            if convert_to_mp3(no_silence_path, channel_mp3_path) and upload_to_s3(channel_mp3_path, f"{date_dialplan}/{channel_mp3_file}"):
+                os.remove(channel_mp3_path)
                 os.remove(no_silence_path)
 
 def callback(ch, method, properties, body):
     logging.info("Mensaje recibido desde RabbitMQ.")
-
     message = json.loads(body)
     file_name = message['fileName']
     date_file_name = message['dateFileName']
@@ -129,7 +131,6 @@ def callback(ch, method, properties, body):
     else:
         process_audio_file(file_name, date_file_name)
 
-    # Enviar acuse de recibo
     ch.basic_ack(delivery_tag=method.delivery_tag)
 
 def consume():
