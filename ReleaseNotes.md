@@ -1,15 +1,12 @@
 # Release Notes
-2024-03-05
+2024-09-20
 
 ## Added
 
-## Changed
+* New function for CRM customer ID module.
 
-* oml-473 The code was optimized in general.
+## Changed
 
 ## Fixed
 
-
 ## Removed
-
-
