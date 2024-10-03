@@ -130,11 +130,11 @@ class FastAGIServer(threading.Thread):
 
         try:
             with psycopg2.connect(
-                host=os.getenv('PGHOST'),
-                port=os.getenv('PGPORT'),
-                dbname=os.getenv('PGDATABASE'),
-                user=os.getenv('PGUSER'),
-                password=os.getenv('PGPASSWORD')) as conn:
+                    host=os.getenv('PGHOST'),
+                    port=os.getenv('PGPORT'),
+                    dbname=os.getenv('PGDATABASE'),
+                    user=os.getenv('PGUSER'),
+                    password=os.getenv('PGPASSWORD')) as conn:
                 with conn.cursor() as cursor:
                     insert_query = sql.SQL(
                         'INSERT INTO reportes_app_llamadalog ({}) VALUES ({})'
@@ -283,16 +283,37 @@ class FastAGIServer(threading.Thread):
                 "Se esperaban 9 argumentos.")
             return
 
-        data = json.dumps(args[0][0:9])
-        family_key = 'OML:QUEUE:SURVEY_ANSWERS'
+        respuesta = args[0]
+        respuesta_dict = {
+            'campana_id': respuesta[0],
+            'pregunta_id': respuesta[1],
+            'opcion_id': None if respuesta[2] == '-1' else respuesta[2],
+            'fecha': respuesta[3],
+            'callid': respuesta[4],
+            'callerid': respuesta[5],
+            'contacto_id': None if respuesta[6] == '-1' else respuesta[6],
+            'agente_id': None if respuesta[7] == '-1' else respuesta[7],
+            'grabacion': None if respuesta[8] == '-1' else respuesta[8],
+        }
 
         try:
-            redis_connection = self.get_redis_connection()
-            redis_connection.rpush(family_key, data)
-            root_logger.info(
-                "Datos de encuesta almacenados correctamente: %s", data)
-        except redis.exceptions.RedisError as e:
-            root_logger.error("Error al ejecutar el comando RPUSH en Redis: %s", e)
+            with psycopg2.connect(
+                    host=os.getenv('PGHOST'),
+                    port=os.getenv('PGPORT'),
+                    dbname=os.getenv('PGDATABASE'),
+                    user=os.getenv('PGUSER'),
+                    password=os.getenv('PGPASSWORD')) as conn:
+                with conn.cursor() as cursor:
+                    insert_query = sql.SQL(
+                        'INSERT INTO survey_app_respuestadepreguntadeencuesta ({}) VALUES ({})'
+                        ).format(
+                            sql.SQL(',').join(map(sql.Identifier, respuesta_dict.keys())),
+                            sql.SQL(',').join(map(sql.Placeholder, respuesta_dict.keys()))
+                            )
+                    cursor.execute(insert_query, respuesta_dict)
+                    conn.commit()
+        except Exception as e:
+            root_logger.error('Error inserting survey data into DB: %s', e)
 
     def set_asterisk_channel_variables_from_api(self, agi, *args, **kwargs):
         if len(args) < 2:  # Revisar que hay al menos dos argumentos
