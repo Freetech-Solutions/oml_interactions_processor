@@ -1,15 +1,14 @@
 # Release Notes
-2024-03-05
+2024-10-09
 
 ## Added
 
+* New function for CRM customer ID module.
+
 ## Changed
 
-* oml-473 The code was optimized in general.
+* The Survey Addon function now registers dialplan DTMF answer directly in PostgreSQL
 
 ## Fixed
 
-
 ## Removed
-
-
