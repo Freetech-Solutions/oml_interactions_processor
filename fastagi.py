@@ -28,6 +28,11 @@ root_logger.addHandler(stdout_handler)
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(BASE_DIR)
 
+CALLDATA_CAMP_KEY = 'OML:CALLDATA:CAMP:{0}'
+CALLDATA_AGENT_KEY = 'OML:CALLDATA:AGENT:{0}'
+CALLDATA_WAIT_KEY = 'OML:CALLDATA:WAIT-TIME:CAMP:{0}'
+CALLEVENTS_CHANNEL = 'OML:CHANNEL:CALLEVENTS'
+
 
 class FastAGIServer(threading.Thread):
     def __init__(self):
@@ -110,6 +115,7 @@ class FastAGIServer(threading.Thread):
             tipo_llamada, tipo_campana, bridge_wait_time, duracion_llamada, \
             archivo_grabacion, agente_extra_id, campana_extra_id, numero_extra = arguments
 
+        # ---- Event logging in PGSQL reportes_app_llamadalog ----
         llamadalog_dict = {
             'time': self.get_date(),
             'callid': callid,
@@ -149,42 +155,66 @@ class FastAGIServer(threading.Thread):
         except Exception as e:
             root_logger.error('Error inserting data into DB: %s', e)
 
-        redis_key_camp = f'OML:CALLDATA:CAMP:{campana_id}'
-        field_campana = f'CALL_TYPE:{tipo_llamada}:{event}'
-        self.event_camp_sum(redis_key_camp, field_campana)
+        # ---- OML CALLDATA Redis logging ----
+        self._record_camp_calldata_event(campana_id, tipo_llamada, event)
+        self._record_attended_call_wait_time(campana_id, agente_id, bridge_wait_time, event)
 
-        redis_key_agent = f'OML:CALLDATA:AGENT:{agente_id}'
-        field_agent = f'CALL_TYPE:{tipo_llamada}:{event}'
-        self.event_agent_sum(redis_key_agent, field_agent, event)
+        # Todavia sin uso:
+        # self._record_agent_calldata_event(agente_id, tipo_llamada, event)
 
-        redis_key_wait_time = f'OML:CALLDATA:WAIT-TIME:CAMP:{campana_id}'
-        self.event_camp_queue_wait_time(
-            redis_key_wait_time, bridge_wait_time, event)
+    def _notify_calldata_event(self, event_data):
+        try:
+            redis_connection = self.get_redis_connection()
+            redis_connection.publish(CALLEVENTS_CHANNEL, json.dumps(event_data))
+        except redis.exceptions.RedisError as e:
+            root_logger.error("Redis _notify_calldata_event error: %s", e)
 
-    def event_camp_sum(self, redis_key, field):
+    # Redis events CAMP INCRDB
+    def _record_camp_calldata_event(self, campana_id, tipo_llamada, event):
+        redis_key = CALLDATA_CAMP_KEY.format(campana_id)
+        field = f'CALL_TYPE:{tipo_llamada}:{event}'
         try:
             redis_connection = self.get_redis_connection(db=2)
             redis_connection.hincrby(redis_key, field, 1)
+            self._notify_calldata_event({'type': 'CAMP',
+                                         'id': campana_id,
+                                         'event': event,
+                                         'call_type': tipo_llamada})
         except redis.exceptions.RedisError as e:
-            root_logger.error("Redis camp_sum error: %s", e)
+            root_logger.error("Redis _record_camp_calldata_event error: %s", e)
 
-    def event_agent_sum(self, redis_key, field, event):
-        try:
-            redis_connection = self.get_redis_connection(db=2)
-            if event in [
-                "ANSWER", "CONNECT", "RINGNOANSWER", "DIAL", "CANCEL",
-                "CONGESTION"]:
-                redis_connection.hincrby(redis_key, field, 1)
-        except redis.exceptions.RedisError as e:
-            root_logger.error("Redis agent_sum error: %s", e)
-
-    def event_camp_queue_wait_time(self, redis_key, wait_time, event):
-        try:
-            redis_connection = self.get_redis_connection(db=2)
-            if event in ["CONNECT", "ABANDON"]:
+    def _record_attended_call_wait_time(self, campana_id, agente_id, wait_time, event):
+        if agente_id is None or agente_id == '-1':
+            return
+        EVENTOS_FIN_CONEXION_ORIGINAL = [
+            'COMPLETEAGENT', 'COMPLETEOUTNUM', 'BT-TRY', 'BTOUT-TRY',
+            'CAMPT-COMPLETE', 'CAMPT-FAIL', 'COMPLETE-CAMPT', 'CT-COMPLETE', 'CTOUT-COMPLETE'
+        ]
+        if event in EVENTOS_FIN_CONEXION_ORIGINAL:
+            redis_key = CALLDATA_WAIT_KEY.format(campana_id)
+            try:
+                redis_connection = self.get_redis_connection(db=2)
                 redis_connection.rpush(redis_key, wait_time)
-        except redis.exceptions.RedisError as e:
-            root_logger.error("Redis event_queue error: %s", e)
+                self._notify_calldata_event({'type': 'WAIT',
+                                             'id': campana_id,
+                                             'time': wait_time})
+            except redis.exceptions.RedisError as e:
+                root_logger.error("Redis _record_attended_call_wait_time error: %s", e)
+
+    # # Redis events AGENT INCRDB
+    # def _record_agent_calldata_event(self, agente_id, tipo_llamada, event):
+    #     redis_key = CALLDATA_AGENT_KEY.format(agente_id)
+    #     field = f'CALL_TYPE:{tipo_llamada}:{event}'
+    #     try:
+    #         redis_connection = self.get_redis_connection(db=2)
+    #         if event in ["ANSWER", "CONNECT", "RINGNOANSWER", "DIAL", "CANCEL", "CONGESTION"]:
+    #             redis_connection.hincrby(redis_key, field, 1)
+    #             self.notify_calldata_event({'type': 'AGENT',
+    #                                         'id': agente_id,
+    #                                         'event': event,
+    #                                         'call_type': tipo_llamada})
+    #     except redis.exceptions.RedisError as e:
+    #         self.write_time_stderr(f"Redis _record_agent_calldata_event error: {e}")
 
     def omni_retrieve_conf(self, agi, *args, **kwargs):
         arguments = args[0]
@@ -367,7 +397,6 @@ class FastAGIServer(threading.Thread):
         except Exception as e:
             root_logger.error("Unexpected error: %s", e)
             raise e
-
 
     def kill(self):
         self._fagi_server.shutdown()
