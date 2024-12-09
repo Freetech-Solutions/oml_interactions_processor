@@ -226,6 +226,8 @@ class FastAGIServer(threading.Thread):
         family_type, item_id = arguments[:2]
         family_key = f'OML:{family_type}:{item_id}'
 
+        redis_connection = self.get_redis_connection(db=0)
+
         try:
             redis_connection = self.get_redis_connection(db=0)
             family_data = redis_connection.hgetall(family_key)
@@ -351,8 +353,8 @@ class FastAGIServer(threading.Thread):
             return
 
         # Verificar si los argumentos son tuplas, y extraer los valores si es necesario
-        url = args[0]
-        codcli = args[1]
+        url = args[0][0]
+        codcli = args[0][1]
 
         # Asegurarse de que 'url' y 'codcli' sean cadenas
         if isinstance(url, tuple):
