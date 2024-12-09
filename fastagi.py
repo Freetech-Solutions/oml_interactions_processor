@@ -353,8 +353,8 @@ class FastAGIServer(threading.Thread):
             return
 
         # Verificar si los argumentos son tuplas, y extraer los valores si es necesario
-        url = args[0]
-        codcli = args[1]
+        url = args[0][0]
+        codcli = args[0][1]
 
         # Asegurarse de que 'url' y 'codcli' sean cadenas
         if isinstance(url, tuple):
