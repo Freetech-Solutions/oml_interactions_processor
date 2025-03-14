@@ -12,6 +12,9 @@ import psycopg2
 from psycopg2 import sql
 import json
 import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configuración del logger
 root_logger = logging.getLogger()
@@ -60,7 +63,13 @@ class FastAGIServer(threading.Thread):
         self._fagi_server.register_script_handler(
             re.compile('omni-crm-customer-vars'),
             self.set_asterisk_channel_variables_from_api)
-
+        self._fagi_server.register_script_handler(
+            re.compile('omni-dial2multinum'),
+            self.omni_dial2multinum)
+        self._fagi_server.register_script_handler(
+            re.compile('omni-notify-multinum-answer'),
+            self.omni_notify_multinum_answer)
+        
     def variables(self, agi, *args, **kwargs):
         argumento = args[0]
         agi.execute(pystrix.agi.core.SetVariable(
@@ -397,6 +406,66 @@ class FastAGIServer(threading.Thread):
         except Exception as e:
             root_logger.error("Unexpected error: %s", e)
             raise e
+
+    def omni_dial2multinum(self, agi, *args, **kwargs):
+        # Obtener la variable EXTEN
+        exten = agi.execute(pystrix.agi.core.GetFullVariable('${EXTEN}'))
+
+        # Dividir la cadena en un array
+        multinum_array = exten.split('_')
+
+        # Guardar el array en la variable MULTINUM
+        agi.execute(pystrix.agi.core.SetVariable('__MULTINUM', exten))
+
+        # Recorrer el array y crear variables EXTEN_i
+        for i, value in enumerate(multinum_array):
+            # Crear la variable EXTEN_i (EXTEN_0, EXTEN_1, etc.)
+            variable_name = f'EXTEN_{i}'
+            agi.execute(pystrix.agi.core.SetVariable(variable_name, value))            
+
+        # Crear la variable MULTINUM_COUNT con la cantidad de elementos
+        multinum_count = len(multinum_array)
+        agi.execute(pystrix.agi.core.SetVariable('MULTINUM_COUNT', str(multinum_count)))
+
+    def omni_notify_multinum_answer(self, agi, *args, **kwargs):
+        """
+        Notifica a OmniLeads el numero de tel de la llamada multinumero que fue atendida.
+        
+        Args:
+            agi: Objeto AGI para interactuar con Asterisk
+            args: Argumentos pasados desde el dialplan (agent_id, phone)
+            kwargs: Argumentos adicionales
+        """
+        try:
+            # Obtener la URL base del entorno
+            base_url = os.environ.get('OMNILEADS_HOSTNAME', 'localhost')
+            
+            # Construir la URL completa
+            url = f'https://{base_url}/api/v1/asterisk/notify_attended_multinum_call/'
+            
+            # Extraer correctamente los argumentos
+            arguments = args[0]
+            if len(arguments) < 2:
+                root_logger.error("Error: Insufficient arguments for omni_notify_multinum_answer")
+                return
+                
+            data = {
+                'agent_id': arguments[0],
+                'phone': arguments[1]
+            }
+            
+            # Realizar la solicitud POST con manejo de errores
+            root_logger.debug(f"Sending notification to {url} with data: {data}")
+            response = requests.post(url, data=data, verify=False, timeout=5)
+            response.raise_for_status()
+            
+            # Registrar la respuesta
+            root_logger.debug(f"Notification successful: {response.status_code}")
+            
+        except requests.exceptions.RequestException as e:
+            root_logger.error(f"Error en la solicitud HTTP a {url}: {e}")
+        except Exception as e:
+            root_logger.error(f"Error inesperado en omni_notify_multinum_answer: {e}")
 
     def kill(self):
         self._fagi_server.shutdown()
