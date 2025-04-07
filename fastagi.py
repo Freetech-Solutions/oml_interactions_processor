@@ -64,6 +64,8 @@ class FastAGIServer(threading.Thread):
             re.compile('omni-crm-customer-vars'),
             self.set_asterisk_channel_variables_from_api)
         self._fagi_server.register_script_handler(
+            re.compile('omni-conference-ids'), self.omni_conference_ids)
+        self._fagi_server.register_script_handler(
             re.compile('omni-dial2multinum'),
             self.omni_dial2multinum)
         self._fagi_server.register_script_handler(
@@ -406,6 +408,32 @@ class FastAGIServer(threading.Thread):
         except Exception as e:
             root_logger.error("Unexpected error: %s", e)
             raise e
+
+    def omni_conference_ids(self, agi, *args, **kwargs):
+        arguments = args[0]
+        if len(arguments) < 2:
+            root_logger.error("Error: Insufficient arguments provided")
+            return
+            
+        command, conference_id = arguments[:2]
+        conference_key = f'OML:CONFERENCE:{conference_id}'
+    
+        redis_connection = self.get_redis_connection()
+
+        if command not in ['SET']:
+            root_logger.error("Unknown command %s", command)
+            return
+
+        try:
+            if command == 'SET':
+                data = {
+                    'CONF_PSTN1': arguments[2],
+                    'CONF_PSTN2': arguments[3],
+                }
+                redis_connection.hset(conference_key, mapping=data)
+                redis_connection.expire(conference_key, 3600)
+        except redis.exceptions.RedisError as e:
+            root_logger.error("Error executing Redis command: %s", e)
 
     def omni_dial2multinum(self, agi, *args, **kwargs):
         # Obtener la variable EXTEN
