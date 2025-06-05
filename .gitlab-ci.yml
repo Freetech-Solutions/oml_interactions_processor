@@ -18,17 +18,14 @@ container-image-dev:
     - |-
       if [ "${CI_COMMIT_BRANCH}" == "main" ]; then
         echo "${DOCKER_SECRET}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
-        IMAGE_VERSION=$(cat version.txt)
+        IMAGE_VERSION="$(date +%Y%m%d)-${CI_COMMIT_SHORT_SHA}"
         docker tag run omnileads/fastagi:$IMAGE_VERSION
         docker push docker.io/omnileads/fastagi:$IMAGE_VERSION
       else
         echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USER}" --password-stdin
-        IMAGE_VERSION=$(cat version.txt)
+        IMAGE_VERSION="$(date +%Y%m%d)-${CI_COMMIT_SHORT_SHA}"
         docker tag run freetechsolutions/fastagi:$IMAGE_VERSION
         docker push docker.io/freetechsolutions/fastagi:$IMAGE_VERSION
       fi  
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop"'
-    - if: '$CI_COMMIT_REF_NAME =~ /build/'
     - if: '$CI_PIPELINE_SOURCE == "web"'
