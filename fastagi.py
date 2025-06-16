@@ -37,6 +37,7 @@ CALLDATA_WAIT_KEY = 'OML:CALLDATA:WAIT-TIME:CAMP:{0}'
 CALLEVENTS_CHANNEL = 'OML:CHANNEL:CALLEVENTS'
 
 
+
 class FastAGIServer(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -71,7 +72,10 @@ class FastAGIServer(threading.Thread):
         self._fagi_server.register_script_handler(
             re.compile('omni-notify-multinum-answer'),
             self.omni_notify_multinum_answer)
-        
+        self._fagi_server.register_script_handler(
+            re.compile('omni-amd'),
+            self.omni_amd)
+
     def variables(self, agi, *args, **kwargs):
         argumento = args[0]
         agi.execute(pystrix.agi.core.SetVariable(
@@ -211,21 +215,6 @@ class FastAGIServer(threading.Thread):
                                              'time': wait_time})
             except redis.exceptions.RedisError as e:
                 root_logger.error("Redis _record_attended_call_wait_time error: %s", e)
-
-    # # Redis events AGENT INCRDB
-    # def _record_agent_calldata_event(self, agente_id, tipo_llamada, event):
-    #     redis_key = CALLDATA_AGENT_KEY.format(agente_id)
-    #     field = f'CALL_TYPE:{tipo_llamada}:{event}'
-    #     try:
-    #         redis_connection = self.get_redis_connection(db=2)
-    #         if event in ["ANSWER", "CONNECT", "RINGNOANSWER", "DIAL", "CANCEL", "CONGESTION"]:
-    #             redis_connection.hincrby(redis_key, field, 1)
-    #             self.notify_calldata_event({'type': 'AGENT',
-    #                                         'id': agente_id,
-    #                                         'event': event,
-    #                                         'call_type': tipo_llamada})
-    #     except redis.exceptions.RedisError as e:
-    #         self.write_time_stderr(f"Redis _record_agent_calldata_event error: {e}")
 
     def omni_retrieve_conf(self, agi, *args, **kwargs):
         arguments = args[0]
@@ -476,24 +465,102 @@ class FastAGIServer(threading.Thread):
             if len(arguments) < 2:
                 root_logger.error("Error: Insufficient arguments for omni_notify_multinum_answer")
                 return
-                
+
             data = {
                 'agent_id': arguments[0],
                 'phone': arguments[1]
             }
-            
+
             # Realizar la solicitud POST con manejo de errores
             root_logger.debug(f"Sending notification to {url} with data: {data}")
             response = requests.post(url, data=data, verify=False, timeout=5)
             response.raise_for_status()
-            
+
             # Registrar la respuesta
             root_logger.debug(f"Notification successful: {response.status_code}")
-            
+
         except requests.exceptions.RequestException as e:
             root_logger.error(f"Error en la solicitud HTTP a {url}: {e}")
         except Exception as e:
             root_logger.error(f"Error inesperado en omni_notify_multinum_answer: {e}")
+
+    def omni_amd(self, agi, *args, **kwargs):
+        """
+        Lee ${CALLERID(name)}, parsea idCamp, idContact y telContact,
+        y hace un POST a:
+        https://{DIALER_AMD_ENDPOINT}/add_amd_event/
+        con el JSON:
+        {
+            "id_contact": 3,
+            "id_campaign": 7,
+            "phone_number": "123456789"
+        }
+        """
+
+        # 1. Leer CallerIDName
+        try:
+            res = agi.execute(pystrix.agi.core.GetFullVariable('${CALLERID(name)}'))
+            caller_name = res.get('value') if isinstance(res, dict) else res
+        except Exception as e:
+            root_logger.error("Error leyendo ${CALLERID(name)}: %s", e)
+            return
+
+        if not caller_name:
+            root_logger.error("CallerIDName vacío, no se puede parsear")
+            return
+
+        # 2. Parsear "10_5_123456751"
+        m = re.match(r'^(\d+)_(\d+)_(\d+)$', caller_name)
+        if not m:
+            root_logger.error(
+                "CallerIDName '%s' no coincide con patrón idCamp_idContact_telContact",
+                caller_name
+            )
+            return
+
+        idCamp, idContact, telContact = m.groups()
+        root_logger.info(
+            "Parsed CallerIDName → idCamp=%s, idContact=%s, telContact=%s",
+            idCamp, idContact, telContact
+        )
+
+        # 3. Leer base y asegurar esquema HTTPS
+        base = os.getenv('DIALER_AMD_ENDPOINT', '').strip()
+        if not base:
+            root_logger.error("DIALER_AMD_ENDPOINT no está definido")
+            return
+
+        if not base.startswith(('http://', 'https://')):
+            base = 'http://' + base
+
+        # 4. Construir URL final (sin el idContact ahora)
+        url = base.rstrip('/') + "/add_amd_event"
+        root_logger.debug("POST URL construida: %s", url)
+
+        # 5. Payload con nuevos nombres
+        payload = {
+            "id_contact": int(idContact),
+            "id_campaign": int(idCamp),
+            "phone_number": telContact
+        }
+
+        # 6. Envío POST
+        try:
+            resp = requests.post(
+                url,
+                json=payload,
+                timeout=5,
+                verify=False
+            )
+            if resp.ok:
+                root_logger.info("POST correcto a %s → %s", url, payload)
+            else:
+                root_logger.error(
+                    "POST a %s falló: %s – %s",
+                    url, resp.status_code, resp.text
+                )
+        except Exception as e:
+            root_logger.error("Error haciendo POST a %s: %s", url, e)
 
     def kill(self):
         self._fagi_server.shutdown()
