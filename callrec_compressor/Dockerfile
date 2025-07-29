@@ -25,7 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg sox \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY src/app.py /app/
+COPY src/callrec_compressor.py /app/
 
 RUN useradd -M -u 1000 omnileads
 RUN chown -R omnileads.omnileads /app
+
+ENTRYPOINT [ "python3", "callrec_compressor.py" ]

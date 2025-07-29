@@ -10,7 +10,7 @@ from botocore.exceptions import NoCredentialsError, ClientError
 # ───── Configuración general ─────
 ASTERISK_MONITOR_PATH = '/var/spool/asterisk/monitor/'
 GEARMAN_SERVER = os.getenv('GEARMAN_HOST', 'gearman:4730')
-TASK_NAME = b'tel_callrec'
+TASK_NAME = b'tel-callrec-compressor'
 
 # ───── Logging estructurado ─────
 logger = logging.getLogger("callrec_worker")
@@ -79,7 +79,7 @@ def task_process_audiofile(gearman_worker, gearman_job):
 
         # Corregido: usar gearman_job.data en lugar de task.arg
         data = json.loads(gearman_job.data.decode('utf-8'))
-        source_file = data['fileName']
+        source_file = data['fileName'] + '.wav'
         date_dialplan = data['dateFileName']
 
         source_path = f"{ASTERISK_MONITOR_PATH}{date_dialplan}/{source_file}"
