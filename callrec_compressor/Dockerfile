@@ -1,5 +1,5 @@
 # Etapa de construcción
-FROM python:3.12-slim-bookworm as build
+FROM python:3.8-slim-bookworm AS build
 
 WORKDIR /app
 COPY requirements.txt /app/
@@ -16,16 +16,18 @@ RUN pip install --upgrade pip setuptools \
     && pip install --no-cache-dir -r requirements.txt
 
 # Etapa de ejecución
-FROM python:3.12-slim-bookworm as run
+FROM python:3.8-slim-bookworm AS run
 
-COPY --from=build /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=build /usr/local/lib/python3.8/site-packages /usr/local/lib/python3.8/site-packages
 COPY --from=build /usr/local/bin /usr/local/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg sox \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY app.py /app/
+COPY src/callrec_compressor.py /app/
 
 RUN useradd -M -u 1000 omnileads
 RUN chown -R omnileads.omnileads /app
+
+ENTRYPOINT [ "python3", "callrec_compressor.py" ]

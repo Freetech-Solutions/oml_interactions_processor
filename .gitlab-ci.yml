@@ -1,33 +1,78 @@
 stages:
   - build
 
-container-image-dev:
+# ---------------------------------------------------------
+# TEMPLATE GENÉRICO PARA BUILD DE IMÁGENES DOCKER
+# ---------------------------------------------------------
+.build_template:
+  image: docker:20.10.15-alpine3.15
   services:
     - docker:20.10.15-dind-alpine3.15
-  image: docker:20.10.15-alpine3.15
-  stage: build
   before_script:
     - apk add --no-cache docker-cli-buildx
+  variables:
+    # habilita buildx
+    DOCKER_DRIVER: overlay2
+    # para pasar --target u otros args a build
+    DOCKER_BUILD_ARGS: ""
+    # sufijo que iremos rellenando en cada job
+    TAG_SUFFIX: ""
   script:
-    - >-
-      docker buildx build
-      --file=Dockerfile
-      --tag=run
-      --target=run
-      .
-    - |-
-      if [ "${CI_COMMIT_BRANCH}" == "main" ]; then
+    - echo "📦 Building ${IMAGE_NAME} (target=${DOCKER_BUILD_ARGS})..."
+    - ls -l ${DOCKERFILE_PATH}
+    - docker buildx build ${DOCKER_BUILD_ARGS} --file=${DOCKERFILE_PATH} --tag=${IMAGE_NAME} ${BUILD_CONTEXT}
+    - |
+      echo "🚀 Pushing image ${IMAGE_NAME}..."
+      if [ "${CI_COMMIT_BRANCH}" = "main" ]; then
         echo "${DOCKER_SECRET}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
-        IMAGE_VERSION=$(cat version.txt)
-        docker tag run omnileads/interaction_processor:$IMAGE_VERSION
-        docker push docker.io/omnileads/interaction_processor:$IMAGE_VERSION
+        REGISTRY_NS="omnileads"
       else
         echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USER}" --password-stdin
-        IMAGE_VERSION=$(cat version.txt)
-        docker tag run freetechsolutions/interaction_processor:$IMAGE_VERSION
-        docker push docker.io/freetechsolutions/interaction_processor:$IMAGE_VERSION
-      fi  
+        REGISTRY_NS="freetechsolutions"
+      fi
+      DATE_TAG=$(date +%Y%m%d)
+      SHORT_SHA=${CI_COMMIT_SHORT_SHA}
+      # aquí concatenamos el sufijo
+      IMAGE_VERSION="${DATE_TAG}-${SHORT_SHA}${TAG_SUFFIX}"
+      docker tag ${IMAGE_NAME} docker.io/${REGISTRY_NS}/${IMAGE_NAME}:${IMAGE_VERSION}
+      docker push docker.io/${REGISTRY_NS}/${IMAGE_NAME}:${IMAGE_VERSION}
   rules:
-    - if: '$CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main"'
     - if: '$CI_COMMIT_REF_NAME =~ /build/'
     - if: '$CI_PIPELINE_SOURCE == "web"'
+
+# ---------------------------------------------------------
+# JOB: callrec_compressor (sin cambios)
+# ---------------------------------------------------------
+callrec_compressor:
+  extends: .build_template
+  stage: build
+  variables:
+    IMAGE_NAME: "callrec_compressor"
+    DOCKERFILE_PATH: "callrec_compressor/Dockerfile"
+    BUILD_CONTEXT: "callrec_compressor"
+
+# ---------------------------------------------------------
+# JOB: callrec_transcriber SaaS (añade sufijo -saas)
+# ---------------------------------------------------------
+callrec_transcriber_saas:
+  extends: .build_template
+  stage: build
+  variables:
+    IMAGE_NAME: "callrec_transcriber"
+    DOCKERFILE_PATH: "callrec_transcriber/Dockerfile"
+    BUILD_CONTEXT: "callrec_transcriber"
+    DOCKER_BUILD_ARGS: "--target=saas"
+    TAG_SUFFIX: "-saas"
+
+# ---------------------------------------------------------
+# JOB: callrec_transcriber Local (añade sufijo -local)
+# ---------------------------------------------------------
+callrec_transcriber_local:
+  extends: .build_template
+  stage: build
+  variables:
+    IMAGE_NAME: "callrec_transcriber"
+    DOCKERFILE_PATH: "callrec_transcriber/Dockerfile"
+    BUILD_CONTEXT: "callrec_transcriber"
+    DOCKER_BUILD_ARGS: "--target=onpremise"
+    TAG_SUFFIX: "-local"

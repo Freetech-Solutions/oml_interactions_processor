@@ -12,19 +12,15 @@ This component is responsible for processing call recordings from the telephony 
 The following list of environment variables needs to be passed when running the component as part of the OMniLeads suite.
 
 ```
-TZ=
-RABBITMQ_HOST={{ rabbitmq_host }}
-S3_BUCKET_NAME={{ bucket_name }}
-S3_ENDPOINT={{ minio_host }}
-AWS_ACCESS_KEY_ID={{ bucket_access_key }}
-AWS_SECRET_ACCESS_KEY={{ bucket_secret_key }}
-AWS_DEFAULT_REGION=us-east-1
-CALLREC_DEVICE=s3
+GEARMAN_HOST
+S3_BUCKET_NAME
+S3_ENDPOINT
+AWS_ACCESS_KEY_ID
+AWS_SECRET_ACCESS_KEY
+AWS_DEFAULT_REGION
 ```
 
-Requests are received through a RabbitMQ queue and are sent from an Asterisk ACD instance that has just finished generating a recording of a telephone call.
-
-![Diagrama deploy tool](png/interaction_processor.png)
+Requests are received through a Gearman Job Server (tel_callrec) queue and are sent from an Asterisk ACD instance that has just finished generating a recording of a telephone call.
 
 
 
