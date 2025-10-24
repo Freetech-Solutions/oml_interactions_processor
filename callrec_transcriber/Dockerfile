@@ -1,89 +1,72 @@
 # syntax=docker/dockerfile:1
 
 ########################################
-# 0) Base builder común: deps sistema + venv
+# 1) Base builder: system deps + venv + pip install
 ########################################
-FROM python:3.12-slim AS base-builder
+FROM python:3.12-slim AS builder
 
-# deps para compilación y audio
+ENV DEBIAN_FRONTEND=noninteractive
+
+# deps para compilación y audio (build-essential solo en builder)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git build-essential ffmpeg sox && \
-    rm -rf /var/lib/apt/lists/*
+      git build-essential ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# venv aislado
+# Crear venv ANTES de instalar dependencias
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-########################################
-# 1) Builder SaaS: sólo deps remotas
-########################################
-FROM base-builder AS builder-saas
+# Actualizar pip/packaging dentro del venv
+RUN python -m pip install --upgrade pip setuptools wheel
 
-COPY requirements_saas.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements_saas.txt
+# Copiar requirements y pip install dentro del venv
+COPY requirements.txt .
+# Prefer binary wheels but allow fallback if binary missing (safer than --only-binary)
+RUN python -m pip install --no-cache-dir --prefer-binary -r requirements.txt
 
-########################################
-# 2) Builder On-Premise: SaaS + Whisper/Triton
-########################################
-FROM builder-saas AS builder-onprem
-
-# añadimos sólo lo que falta para el motor local
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir triton==3.3.1 openai-whisper==20250625
+# Copiar código para que pueda aprovechar cache de capas si cambia sólo el código
+COPY src/ /app
 
 ########################################
-# 3) Imagen final SaaS
+# 2) Imagen final (runtime)
 ########################################
-FROM python:3.12-slim AS saas
+FROM python:3.12-slim AS run
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps: solo lo necesario (no build-essential)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg sox && \
+    apt-get install -y --no-install-recommends ffmpeg && \
     rm -rf /var/lib/apt/lists/*
 
-# usuario con home válido para cache de 3rd-party libs
+# Crear usuario no-root
 RUN addgroup --system appgroup \
  && adduser --system --ingroup appgroup --home /home/omnileads -u 1000 omnileads \
  && mkdir -p /home/omnileads/.cache \
  && chown -R omnileads:appgroup /home/omnileads
 
-# traemos sólo el venv con deps SaaS
-COPY --from=builder-saas /opt/venv /opt/venv
+# Traer el venv con todas las deps instaladas
+COPY --from=builder /opt/venv /opt/venv
+RUN chown -R omnileads:appgroup /opt/venv
 
+# App
 WORKDIR /app
-COPY src/callrec_transcriber.py .
+COPY --from=builder /app /app
 
 ENV PATH="/opt/venv/bin:$PATH" \
-    HOME=/home/omnileads
+    HOME=/home/omnileads \
+    HF_HOME=/opt/models \
+    FASTER_WHISPER_DEVICE=cpu \
+    FASTER_WHISPER_COMPUTE_TYPE=int8 \
+    WHISPER_MODEL=small
 
 USER omnileads
-CMD ["python", "callrec_transcriber.py"]
 
-########################################
-# 4) Imagen final On-Premise
-########################################
-FROM python:3.12-slim AS onpremise
+# (Opcional) Healthcheck sencillo
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD python -c "print('ok')" || exit 1
 
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg sox && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN addgroup --system appgroup \
- && adduser --system --ingroup appgroup --home /home/omnileads -u 1000 omnileads \
- && mkdir -p /home/omnileads/.cache \
- && chown -R omnileads:appgroup /home/omnileads
-
-# traemos el venv con deps SaaS + Whisper/Triton
-COPY --from=builder-onprem /opt/venv /opt/venv
-
-WORKDIR /app
-COPY src/callrec_transcriber.py .
-
-ENV PATH="/opt/venv/bin:$PATH" \
-    HOME=/home/omnileads
-
-USER omnileads
 CMD ["python", "callrec_transcriber.py"]
