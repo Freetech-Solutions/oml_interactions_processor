@@ -50,7 +50,15 @@ RUN addgroup --system appgroup \
 
 # Traer el venv con todas las deps instaladas
 COPY --from=builder /opt/venv /opt/venv
-RUN chown -R omnileads:appgroup /opt/venv
+
+# Asegurar permisos y podar archivos de desarrollo dentro del venv
+# (evita que el usuario no-root tenga problemas de permisos y reduce el tamaño)
+RUN chown -R omnileads:appgroup /opt/venv \
+  && find /opt/venv -type d -name "__pycache__" -prune -exec rm -rf {} + \
+  && rm -rf /opt/venv/lib/python3.12/site-packages/pip* \
+           /opt/venv/lib/python3.12/site-packages/setuptools* \
+           /opt/venv/lib/python3.12/site-packages/wheel* \
+  && find /opt/venv/lib/python3.12/site-packages -type d -name "tests" -prune -exec rm -rf {} +
 
 # App
 WORKDIR /app

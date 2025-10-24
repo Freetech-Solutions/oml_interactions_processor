@@ -9,17 +9,34 @@ import subprocess
 import gearman
 import boto3
 import requests
-import re
 from typing import Dict, Any, List, Optional
+import re
+import threading
 
-_VALID_NAME = re.compile(r'^[\w\-\.]+$')
-
-# --- 1. Configuración de Logging ---
+# --- 1. Cofigurations ---
 logging.basicConfig(
     level=os.getenv('LOG_LEVEL', 'INFO'),
     format='%(asctime)s %(levelname)s %(name)s - %(message)s'
 )
 logger = logging.getLogger('callrec_transcriber')
+
+_VALID_NAME = re.compile(r'^[A-Za-z0-9_.-]+$')
+
+
+def safe_basename(name: str) -> str:
+    """
+    Validate and return a safe basename (no slashes, only allowed chars).
+    Raises ValueError on invalid input.
+    """
+    if not name or not isinstance(name, str):
+        raise ValueError("empty or non-string name")
+    # disallow path-separators explicitly
+    if '/' in name or '\\' in name:
+        raise ValueError("invalid characters (path separators not allowed)")
+    if not _VALID_NAME.match(name):
+        raise ValueError("invalid characters in name (allowed: A-Za-z0-9_-. )")
+    return name
+
 
 # --- 2. Configuración General ---
 STT_ENGINE = os.getenv('STT_ENGINE', 'local').lower()
@@ -27,38 +44,92 @@ TASK_NAME = os.getenv('TASK_NAME', "tel-callrec-transcriber").encode()
 GEARMAN_SERVER = os.getenv('GEARMAN_HOST', 'gearman:4730')
 ASTERISK_MONITOR_PATH = os.getenv('ASTERISK_MONITOR_PATH', '/var/spool/asterisk/monitor')
 
+# operational flags
+DELETE_WAVS = os.getenv("DELETE_WAVS", "true").lower() == "true"
+MAX_WAV_BYTES = int(os.getenv("MAX_WAV_BYTES", str(200 * 1024 * 1024)))
+FFMPEG_TIMEOUT = int(os.getenv("FFMPEG_TIMEOUT_SEC", "30"))
+
+# ---------- Helpers: cache de transcribers, locks y respuestas job ----------
+_transcriber_cache: Dict[str, "Transcriber"] = {}
+_transcriber_locks: Dict[str, threading.Lock] = {}
+_cache_creation_lock = threading.Lock()
+
+_default_transcriber: Optional[Transcriber] = None
+_default_lock = threading.Lock()
+
+
+def get_default_transcriber() -> Transcriber:
+    """
+    Devuelve el transcriber por defecto (STT_ENGINE), creando y cacheándolo de forma lazy.
+    """
+    global _default_transcriber
+    if _default_transcriber is None:
+        with _default_lock:
+            if _default_transcriber is None:
+                tr, _ = get_cached_transcriber(STT_ENGINE)
+                _default_transcriber = tr
+    return _default_transcriber
+
+
+def job_error(msg: str) -> bytes:
+    return json.dumps({"status": "error", "message": msg}).encode('utf-8')
+
+
+def job_success(results: List[Dict[str, str]]) -> bytes:
+    return json.dumps({"status": "ok", "transcriptions": results}).encode('utf-8')
+
+
+def get_cached_transcriber(engine: str):
+    """
+    Devuelve (transcriber, lock) para el engine, creándolos la primera vez.
+    Seguro frente a concurrencia con _cache_creation_lock.
+    """
+    if engine in _transcriber_cache:
+        return _transcriber_cache[engine], _transcriber_locks[engine]
+
+    with _cache_creation_lock:
+        if engine in _transcriber_cache:
+            return _transcriber_cache[engine], _transcriber_locks[engine]
+        # instanciar (puede lanzar)
+        tr = get_transcriber(engine)
+        lk = threading.Lock()
+        _transcriber_cache[engine] = tr
+        _transcriber_locks[engine] = lk
+        return tr, lk
+
 
 # --- 3. Abstracción del Transcriptor (Patrón Strategy) ---
 class Transcriber:
-    """Clase base para todos los motores de transcripción."""
-    def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Debe devolver:
-        {
-          "text": str,
-          "segments": List[{"start": float, "end": float, "text": str}]
-        }
-        """
-        raise NotImplementedError("Cada motor debe implementar 'transcribe'.")
+    @property
+    def requires_serialization(self) -> bool:
+        """Override en transcribers que necesiten serialización (p.ej. modelos nativos)."""
+        return False
 
 
 # ---------- Motores ----------
 class FasterWhisperTranscriber(Transcriber):
-    """Transcriptor local con faster-whisper (CTranslate2)."""
     def __init__(self):
-        from faster_whisper import WhisperModel  # import perezoso
+        from faster_whisper import WhisperModel
         model_name = os.getenv("WHISPER_MODEL", "small")
-        device = os.getenv("FASTER_WHISPER_DEVICE", "cpu")  # "cpu" | "cuda"
+        device = os.getenv("FASTER_WHISPER_DEVICE", "cpu")
         compute_type = os.getenv("FASTER_WHISPER_COMPUTE_TYPE", "int8")
         logger.info(f"Cargando faster-whisper {model_name} ({device}, {compute_type})...")
         self.model = WhisperModel(model_name, device=device, compute_type=compute_type)
+        # lock por instancia para serializar únicamente el uso del modelo nativo
+        self._model_lock = threading.Lock()
+
+    @property
+    def requires_serialization(self) -> bool:
+        return True
 
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
         use_vad = os.getenv("FW_VAD_FILTER", "true").lower() == "true"
         kwargs = {"vad_filter": use_vad, "beam_size": 5}
         if language:
             kwargs["language"] = language
-        segments_iter, _ = self.model.transcribe(audio_path, **kwargs)
+        # solo esta seccion usa el lock
+        with self._model_lock:
+            segments_iter, _ = self.model.transcribe(audio_path, **kwargs)
 
         segs: List[Dict[str, Any]] = []
         texts: List[str] = []
@@ -71,7 +142,6 @@ class FasterWhisperTranscriber(Transcriber):
 
 
 class OpenAITranscriber(Transcriber):
-    """Transcriptor que utiliza la API de OpenAI Whisper (SaaS)."""
     def __init__(self):
         self.api_key = os.getenv('STT_API_KEY')
         if not self.api_key:
@@ -81,13 +151,12 @@ class OpenAITranscriber(Transcriber):
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
-        for attempt in range(3):
+        max_attempts = 3
+        for attempt in range(max_attempts):
             try:
                 with open(audio_path, 'rb') as audio_file:
                     files = {'file': (os.path.basename(audio_path), audio_file, 'audio/wav')}
-                    # Pedimos verbose_json para obtener segments
                     data = {'model': self.model, 'response_format': 'verbose_json'}
-                    # granularity segment (si el endpoint lo soporta)
                     data['timestamp_granularities[]'] = 'segment'
                     if language:
                         data['language'] = language
@@ -111,11 +180,26 @@ class OpenAITranscriber(Transcriber):
                     } for s in segs_json if isinstance(s, dict)]
                     return {"text": text, "segments": segs}
 
-                logger.error(f"Error en API de OpenAI {response.status_code}: {response.text}")
-                break
+                # Handle 5xx -> retry, 429 -> retry with backoff, 4xx -> no retry (client error)
+                if 500 <= response.status_code < 600:
+                    logger.warning(f"OpenAI server error {response.status_code}, attempt {attempt+1}/{max_attempts}")
+                    time.sleep(1 + attempt)
+                    continue
+                if response.status_code == 429:
+                    logger.warning(f"OpenAI rate limited 429, attempt {attempt+1}/{max_attempts}")
+                    time.sleep(2 + attempt * 2)
+                    continue
+
+                # 4xx client error -> do not retry
+                logger.error(f"OpenAI API client error {response.status_code}: {response.text}")
+                return {"text": "", "segments": []}
+
             except requests.RequestException as e:
-                logger.warning(f"OpenAI POST intento {attempt+1}/3 falló: {e}")
+                logger.warning(f"OpenAI POST intento {attempt+1}/{max_attempts} falló: {e}")
                 time.sleep(1 + attempt)
+
+        # exhausted retries
+        logger.error("OpenAITranscriber: agotados reintentos")
         return {"text": "", "segments": []}
 
 
@@ -246,80 +330,24 @@ s3 = boto3.client(
     region_name=os.getenv('S3_REGION_NAME', None)
 )
 
-# Instancia (default) del transcriptor seleccionado al arrancar
-_default_transcriber = get_transcriber(STT_ENGINE)
-
 
 # --- 5. Lógica del Worker de Gearman ---
 def process_single_wav(path: str, language: Optional[str], _transcriber: Optional[Transcriber] = None) -> Dict[str, Any]:
     """
-    Procesa un WAV: opcionalmente recorta silencios y luego transcribe con el motor seleccionado.
+    Procesa un WAV y lo transcribe con el motor seleccionado.
 
     Retorna: {"text": str, "segments": [{start, end, text}]}
-
-    Env vars:
-      - USE_FFMPEG_TRIM=true|false   (default: false)
-      - TRIM_STOP_DURATION=0.5
-      - TRIM_THRESHOLD_DB=-50
     """
-    use_trim = os.getenv("USE_FFMPEG_TRIM", "false").lower() == "true"
-
-    # Valores de trim (tunear por env)
     try:
-        trim_stop_duration = float(os.getenv("TRIM_STOP_DURATION", "0.5"))
-    except ValueError:
-        trim_stop_duration = 0.5
-    try:
-        trim_threshold_db = float(os.getenv("TRIM_THRESHOLD_DB", "-50"))
-    except ValueError:
-        trim_threshold_db = -50.0
+        if _transcriber is None:
+            _transcriber = get_default_transcriber()
 
-    audio_src_path = path
-    trimmed_path = None
+        engine = _transcriber
+        result = engine.transcribe(path, language=language)
 
-    # 1) Recorte opcional con ffmpeg
-    if use_trim:
-        fd_trim, trimmed_path = tempfile.mkstemp(suffix=".wav")
-        os.close(fd_trim)
-        ffmpeg_filter = (
-            f"silenceremove=stop_periods=-1:"
-            f"stop_duration={trim_stop_duration}:"
-            f"stop_threshold={trim_threshold_db}dB"
-        )
-        try:
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", path, "-af", ffmpeg_filter, trimmed_path],
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL
-            )
-            audio_src_path = trimmed_path
-            logger.debug(
-                f"Silence trim aplicado ({os.path.basename(path)} -> {os.path.basename(trimmed_path)} | "
-                f"dur={trim_stop_duration}s, thr={trim_threshold_db}dB)"
-            )
-        except Exception as e:
-            logger.warning(
-                f"No se pudo recortar el silencio de {os.path.basename(path)}; "
-                f"se usará el original. Detalle: {e}"
-            )
-            audio_src_path = path
-
-    # 2) Transcribir usando el motor seleccionado (inyectado o default)
-    try:
-        engine = _transcriber or _default_transcriber
-        result = engine.transcribe(audio_src_path, language=language)
-        # result: {"text": str, "segments": [...]}
     except Exception as e:
         logger.exception(f"Falló la transcripción de {os.path.basename(path)}: {e}")
         result = {"text": "", "segments": []}
-    finally:
-        # 3) Limpieza: borrar el archivo temporal si lo creamos
-        if trimmed_path:
-            try:
-                os.remove(trimmed_path)
-            except OSError:
-                pass
 
     return result
 
@@ -329,34 +357,50 @@ def task_process_audiofile(_, job):
 
     try:
         payload = json.loads(job.data.decode('utf-8'))
+        # required fields check
         required = ["fileName", "dateFileName"]
         missing = [k for k in required if not payload.get(k)]
         if missing:
             logger.error(f"Payload inválido. Faltan: {', '.join(missing)}")
             return b'Missing fields'
-        
+
+        # sanitize and validate fileName and dateFileName to prevent path traversal
+        try:
+            base_name_raw = payload.get('fileName')
+            date_folder_raw = payload.get('dateFileName')
+            base_name = safe_basename(base_name_raw)
+            date_folder = safe_basename(date_folder_raw)
+        except ValueError as e:
+            logger.error(f"Invalid payload fileName/dateFileName: {e}")
+            return b'Invalid payload'
+
+        # Construct canonical folder_path and ensure it's inside ASTERISK_MONITOR_PATH
+        folder_path = os.path.normpath(os.path.join(ASTERISK_MONITOR_PATH, date_folder))
+        base_monitor_norm = os.path.normpath(ASTERISK_MONITOR_PATH)
+        # Ensure folder_path is strictly under ASTERISK_MONITOR_PATH (avoid ../ tricks)
+        if not (folder_path + os.sep).startswith(base_monitor_norm + os.sep):
+            logger.error("Payload dateFileName points outside monitor path")
+            return b'Invalid payload'
+
         engine_override = (payload.get('engine') or "").lower().strip()
         language = payload.get('language', None)
-        base_name = payload.get('fileName')
-        date_folder = payload.get('dateFileName')
 
-        # Resolver transcriber a usar en ESTE job sin mutar el default
-        current_transcriber = _default_transcriber
-        effective_engine = STT_ENGINE
+        # resolver transcriber (usar cache)
         if engine_override and engine_override != STT_ENGINE:
-            try:
-                logger.info(f"Override de motor: {STT_ENGINE} -> {engine_override}")
-                current_transcriber = get_transcriber(engine_override)
-                effective_engine = engine_override
-            except Exception as e:
-                logger.error(f"Engine '{engine_override}' no disponible: {e}")
-                return b'Unavailable engine'
+            effective_engine = engine_override
+        else:
+            effective_engine = STT_ENGINE
+
+        try:
+            current_transcriber, engine_lock = get_cached_transcriber(effective_engine)
+        except Exception as e:
+            logger.error(f"Engine '{effective_engine}' no disponible: {e}")
+            return job_error('Unavailable engine')
 
         if not base_name or not date_folder:
             logger.error('Payload inválido: faltan fileName o dateFileName')
             return b'Missing fields'
 
-        folder_path = os.path.join(ASTERISK_MONITOR_PATH, date_folder)
         if not os.path.isdir(folder_path):
             logger.error(f'La carpeta de grabaciones no existe: {folder_path}')
             return b'Folder not found'
@@ -373,7 +417,23 @@ def task_process_audiofile(_, job):
                 continue
 
             # Transcribir (con timestamps si el engine lo soporta)
-            result = process_single_wav(full_path, language, _transcriber=current_transcriber)
+            # Chequeo de tamaño antes de procesar
+            try:
+                size = os.path.getsize(full_path)
+                if size > MAX_WAV_BYTES:
+                    logger.error(f"WAV demasiado grande ({size} bytes), se omite: {full_path}")
+                    continue
+            except OSError:
+                logger.warning(f"No se pudo obtener tamaño de archivo de {full_path}; procediendo.")
+
+            # Ejecutar la transcripción bajo el lock del engine (serializa llamadas a native libs)
+            if getattr(current_transcriber, "requires_serialization", False):
+                with engine_lock:
+                    result = process_single_wav(full_path, language, _transcriber=current_transcriber)
+            else:
+                # APIs remotas no necesitan serialización a nivel de proceso local
+                result = process_single_wav(full_path, language, _transcriber=current_transcriber)
+
             text = result.get("text", "") or ""
             segments = result.get("segments", []) or []
 
@@ -440,14 +500,15 @@ def task_process_audiofile(_, job):
             except OSError:
                 pass
 
-        # Limpiar WAV originales después de procesarlos
-        for wav_filename in wav_files:
-            try:
-                os.remove(os.path.join(folder_path, wav_filename))
-            except OSError:
-                pass
+        # Limpiar WAV originales después de procesarlos (si está habilitado)
+        if DELETE_WAVS:
+            for wav_filename in wav_files:
+                try:
+                    os.remove(os.path.join(folder_path, wav_filename))
+                except OSError:
+                    pass
 
-        return json.dumps({'transcriptions': transcription_results}).encode('utf-8')
+        return job_success(transcription_results)
 
     except Exception as e:
         logger.exception(f'Error irrecuperable al procesar el job: {e}')
