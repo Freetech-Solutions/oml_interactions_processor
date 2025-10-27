@@ -54,7 +54,7 @@ callrec_compressor:
 # ---------------------------------------------------------
 # JOB: callrec_transcriber Local (añade sufijo -local)
 # ---------------------------------------------------------
-callrec_transcriber_local:
+callrec_transcriber:
   extends: .build_template
   stage: build
   variables:

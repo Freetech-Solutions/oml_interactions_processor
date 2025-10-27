@@ -5,13 +5,15 @@ import json
 import time
 import logging
 import tempfile
-import subprocess
 import gearman
 import boto3
 import requests
 from typing import Dict, Any, List, Optional
 import re
 import threading
+
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # --- 1. Cofigurations ---
 logging.basicConfig(
@@ -151,57 +153,57 @@ class OpenAITranscriber(Transcriber):
         self.api_url = "https://api.openai.com/v1/audio/transcriptions"
         self.headers = {"Authorization": f"Bearer {self.api_key}"}
 
+        # Session con retry para errores transitorios
+        self.session = requests.Session()
+        retry_kwargs = dict(total=3, backoff_factor=1,
+                            status_forcelist=[429, 500, 502, 503, 504])
+        try:
+            retries = Retry(**retry_kwargs, allowed_methods=["POST", "GET"])
+        except TypeError:
+            retries = Retry(**retry_kwargs, method_whitelist=["POST", "GET"])
+        adapter = HTTPAdapter(max_retries=retries)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
     def transcribe(self, audio_path: str, language: Optional[str] = None) -> Dict[str, Any]:
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                with open(audio_path, 'rb') as audio_file:
-                    files = {'file': (os.path.basename(audio_path), audio_file, 'audio/wav')}
-                    data = {'model': self.model, 'response_format': 'verbose_json'}
-                    data['timestamp_granularities[]'] = 'segment'
-                    if language:
-                        data['language'] = language
+        """
+        Usa self.session.post con retries gestionados por urllib3/requests.
+        Retorna dict {"text":..., "segments":[...]} o vacíos si falla.
+        """
+        try:
+            with open(audio_path, 'rb') as audio_file:
+                files = {'file': (os.path.basename(audio_path), audio_file, 'audio/wav')}
+                data = {'model': self.model, 'response_format': 'verbose_json'}
+                data['timestamp_granularities[]'] = 'segment'
+                if language:
+                    data['language'] = language
 
-                    response = requests.post(
-                        self.api_url,
-                        headers=self.headers,
-                        files=files,
-                        data=data,
-                        timeout=60
-                    )
+                response = self.session.post(
+                    self.api_url,
+                    headers=self.headers,
+                    files=files,
+                    data=data,
+                    timeout=60
+                )
 
-                if response.status_code == 200:
-                    j = response.json()
-                    text = (j.get('text') or "").strip()
-                    segs_json = j.get('segments') or []
-                    segs = [{
-                        "start": float(s.get('start', 0.0)),
-                        "end": float(s.get('end', 0.0)),
-                        "text": (s.get('text') or "").strip()
-                    } for s in segs_json if isinstance(s, dict)]
-                    return {"text": text, "segments": segs}
+            if response.status_code == 200:
+                j = response.json()
+                text = (j.get('text') or "").strip()
+                segs_json = j.get('segments') or []
+                segs = [{
+                    "start": float(s.get('start', 0.0)),
+                    "end": float(s.get('end', 0.0)),
+                    "text": (s.get('text') or "").strip()
+                } for s in segs_json if isinstance(s, dict)]
+                return {"text": text, "segments": segs}
 
-                # Handle 5xx -> retry, 429 -> retry with backoff, 4xx -> no retry (client error)
-                if 500 <= response.status_code < 600:
-                    logger.warning(f"OpenAI server error {response.status_code}, attempt {attempt+1}/{max_attempts}")
-                    time.sleep(1 + attempt)
-                    continue
-                if response.status_code == 429:
-                    logger.warning(f"OpenAI rate limited 429, attempt {attempt+1}/{max_attempts}")
-                    time.sleep(2 + attempt * 2)
-                    continue
+            # Errores 4xx (salvo 429) o cualquier otro código no 200
+            logger.error(f"OpenAI API client error {response.status_code}: {response.text}")
+            return {"text": "", "segments": []}
 
-                # 4xx client error -> do not retry
-                logger.error(f"OpenAI API client error {response.status_code}: {response.text}")
-                return {"text": "", "segments": []}
-
-            except requests.RequestException as e:
-                logger.warning(f"OpenAI POST intento {attempt+1}/{max_attempts} falló: {e}")
-                time.sleep(1 + attempt)
-
-        # exhausted retries
-        logger.error("OpenAITranscriber: agotados reintentos")
-        return {"text": "", "segments": []}
+        except requests.RequestException as e:
+            logger.error(f"OpenAITranscriber: request error or retries exhausted: {e}")
+            return {"text": "", "segments": []}
 
 
 class GeminiTranscriber(Transcriber):
@@ -330,27 +332,6 @@ s3 = boto3.client(
     endpoint_url=os.getenv('S3_ENDPOINT', None),
     region_name=os.getenv('S3_REGION_NAME', None)
 )
-
-# --- Eager load del transcriber local si está configurado ---
-if STT_ENGINE == 'local':
-    try:
-        logger.info("STT_ENGINE='local' -> cargando transcriber local en arranque (eager load)...")
-        # get_cached_transcriber creará la instancia y el lock si no existen
-        tr, lk = get_cached_transcriber('local')
-
-        # Guardamos también como default si aún no existe
-        with _default_lock:
-            if _default_transcriber is None:
-                _default_transcriber = tr
-
-        logger.info("Transcriber local cargado correctamente y cacheado.")
-    except Exception as e:
-        # Error fatal al arrancar el proceso si no podemos inicializar el modelo local.
-        logger.exception(f"Error al inicializar el transcriber local: {e}")
-        # Salimos para que el orquestador vuelva a intentar o el operador vea el fallo
-        sys.exit(1)
-else:
-    logger.info(f"STT_ENGINE='{STT_ENGINE}' -> transcriber local no será cargado en arranque.")
 
 
 # --- 5. Lógica del Worker de Gearman ---
@@ -575,8 +556,47 @@ def task_process_audiofile(_, job):
         return job_error('Fail')
 
 
+def initialize_default_engine(engine: str):
+    """
+    Inicializa y cachea el transcriber indicado.
+    Si engine == 'local' valida HF_HOME (crea si es necesario y verifica permisos).
+    Lanza excepción si falla (fail-fast).
+    """
+    hf_home = os.getenv("HF_HOME", "/opt/models")
+    if engine == "local":
+        try:
+            os.makedirs(hf_home, exist_ok=True)
+            # Verificar escritura (testfile)
+            testfile = os.path.join(hf_home, ".permtest")
+            with open(testfile, "w") as f:
+                f.write("ok")
+            os.remove(testfile)
+        except Exception as e:
+            logger.exception(f"HF_HOME ({hf_home}) not writable or initializable: {e}")
+            raise
+
+    # Crea/cacha el transcriber y su lock
+    tr, lk = get_cached_transcriber(engine)
+    with _default_lock:
+        global _default_transcriber
+        if _default_transcriber is None:
+            _default_transcriber = tr
+    return tr, lk
+
+
 # --- 6. Arranque del Worker ---
 if __name__ == "__main__":
+    # --- EAGER LOAD: inicializar SOLO el engine configurado por STT_ENGINE ---
+    try:
+        logger.info(f"EAGER LOAD: initializing configured STT_ENGINE='{STT_ENGINE}' at startup...")
+        initialize_default_engine(STT_ENGINE)
+        logger.info(f"EAGER LOAD: STT_ENGINE='{STT_ENGINE}' initialized and cached.")
+    except Exception as e:
+        logger.exception(f"EAGER LOAD: failed to initialize configured STT_ENGINE='{STT_ENGINE}': {e}")
+        # Fail-fast: no tiene sentido aceptar jobs sin transcriber disponible
+        sys.exit(1)
+
+    # --- Arranque del Worker ---
     gm_worker = gearman.GearmanWorker([GEARMAN_SERVER])
     gm_worker.register_task(TASK_NAME, task_process_audiofile)  # TASK_NAME es bytes
     logger.info(f"Worker de Gearman listo para recibir tareas en '{TASK_NAME_STR}'...")
