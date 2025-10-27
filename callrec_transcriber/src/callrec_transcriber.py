@@ -41,7 +41,7 @@ def safe_basename(name: str) -> str:
 # --- 2. Configuración General ---
 STT_ENGINE = os.getenv('STT_ENGINE', 'local').lower()
 TASK_NAME_STR = os.getenv('TASK_NAME', "tel-callrec-transcriber")
-TASK_NAME = TASK_NAME_STR.encode()   # ahora TASK_NAME es bytes
+TASK_NAME = TASK_NAME_STR.encode()
 GEARMAN_SERVER = os.getenv('GEARMAN_HOST', 'gearman:4730')
 ASTERISK_MONITOR_PATH = os.getenv('ASTERISK_MONITOR_PATH', '/var/spool/asterisk/monitor')
 
@@ -330,6 +330,27 @@ s3 = boto3.client(
     endpoint_url=os.getenv('S3_ENDPOINT', None),
     region_name=os.getenv('S3_REGION_NAME', None)
 )
+
+# --- Eager load del transcriber local si está configurado ---
+if STT_ENGINE == 'local':
+    try:
+        logger.info("STT_ENGINE='local' -> cargando transcriber local en arranque (eager load)...")
+        # get_cached_transcriber creará la instancia y el lock si no existen
+        tr, lk = get_cached_transcriber('local')
+
+        # Guardamos también como default si aún no existe
+        with _default_lock:
+            if _default_transcriber is None:
+                _default_transcriber = tr
+
+        logger.info("Transcriber local cargado correctamente y cacheado.")
+    except Exception as e:
+        # Error fatal al arrancar el proceso si no podemos inicializar el modelo local.
+        logger.exception(f"Error al inicializar el transcriber local: {e}")
+        # Salimos para que el orquestador vuelva a intentar o el operador vea el fallo
+        sys.exit(1)
+else:
+    logger.info(f"STT_ENGINE='{STT_ENGINE}' -> transcriber local no será cargado en arranque.")
 
 
 # --- 5. Lógica del Worker de Gearman ---
