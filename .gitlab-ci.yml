@@ -62,4 +62,4 @@ callrec_transcriber_local:
     DOCKERFILE_PATH: "callrec_transcriber/Dockerfile"
     BUILD_CONTEXT: "callrec_transcriber"
     DOCKER_BUILD_ARGS: "--target=run"
-    TAG_SUFFIX: "-local"
+    
