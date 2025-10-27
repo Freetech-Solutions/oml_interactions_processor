@@ -40,7 +40,8 @@ def safe_basename(name: str) -> str:
 
 # --- 2. Configuración General ---
 STT_ENGINE = os.getenv('STT_ENGINE', 'local').lower()
-TASK_NAME = os.getenv('TASK_NAME', "tel-callrec-transcriber").encode()
+TASK_NAME_STR = os.getenv('TASK_NAME', "tel-callrec-transcriber")
+TASK_NAME = TASK_NAME_STR.encode()   # ahora TASK_NAME es bytes
 GEARMAN_SERVER = os.getenv('GEARMAN_HOST', 'gearman:4730')
 ASTERISK_MONITOR_PATH = os.getenv('ASTERISK_MONITOR_PATH', '/var/spool/asterisk/monitor')
 
@@ -54,11 +55,11 @@ _transcriber_cache: Dict[str, "Transcriber"] = {}
 _transcriber_locks: Dict[str, threading.Lock] = {}
 _cache_creation_lock = threading.Lock()
 
-_default_transcriber: Optional[Transcriber] = None
+_default_transcriber: Optional["Transcriber"] = None
 _default_lock = threading.Lock()
 
 
-def get_default_transcriber() -> Transcriber:
+def get_default_transcriber() -> "Transcriber":
     """
     Devuelve el transcriber por defecto (STT_ENGINE), creando y cacheándolo de forma lazy.
     """
@@ -362,7 +363,7 @@ def task_process_audiofile(_, job):
         missing = [k for k in required if not payload.get(k)]
         if missing:
             logger.error(f"Payload inválido. Faltan: {', '.join(missing)}")
-            return b'Missing fields'
+            return job_error('Missing fields')
 
         # sanitize and validate fileName and dateFileName to prevent path traversal
         try:
@@ -372,7 +373,7 @@ def task_process_audiofile(_, job):
             date_folder = safe_basename(date_folder_raw)
         except ValueError as e:
             logger.error(f"Invalid payload fileName/dateFileName: {e}")
-            return b'Invalid payload'
+            return job_error('Invalid payload')
 
         # Construct canonical folder_path and ensure it's inside ASTERISK_MONITOR_PATH
         folder_path = os.path.normpath(os.path.join(ASTERISK_MONITOR_PATH, date_folder))
@@ -380,7 +381,7 @@ def task_process_audiofile(_, job):
         # Ensure folder_path is strictly under ASTERISK_MONITOR_PATH (avoid ../ tricks)
         if not (folder_path + os.sep).startswith(base_monitor_norm + os.sep):
             logger.error("Payload dateFileName points outside monitor path")
-            return b'Invalid payload'
+            return job_error('Invalid payload')
 
         engine_override = (payload.get('engine') or "").lower().strip()
         language = payload.get('language', None)
@@ -399,11 +400,49 @@ def task_process_audiofile(_, job):
 
         if not base_name or not date_folder:
             logger.error('Payload inválido: faltan fileName o dateFileName')
-            return b'Missing fields'
+            return job_error('Missing fields')
+
+        # --- Espera y reintentos para carpeta y archivos (evita race conditions)
+        FOLDER_WAIT_SEC = int(os.getenv("FOLDER_WAIT_SEC", "30"))        # tiempo máximo a esperar por la carpeta
+        FOLDER_POLL_INTERVAL = float(os.getenv("FOLDER_POLL_INTERVAL", "0.5"))
+        FILE_WAIT_SEC = int(os.getenv("FILE_WAIT_SEC", "30"))            # tiempo máximo a esperar por los archivos wav
+        FILE_POLL_INTERVAL = float(os.getenv("FILE_POLL_INTERVAL", "0.5"))
+
+        # 1) Esperar carpeta
+        waited = 0.0
+        while not os.path.isdir(folder_path) and waited < FOLDER_WAIT_SEC:
+            logger.debug(f"Folder {folder_path} not found, waiting {FOLDER_POLL_INTERVAL}s... ({waited:.1f}/{FOLDER_WAIT_SEC}s)")
+            time.sleep(FOLDER_POLL_INTERVAL)
+            waited += FOLDER_POLL_INTERVAL
 
         if not os.path.isdir(folder_path):
-            logger.error(f'La carpeta de grabaciones no existe: {folder_path}')
-            return b'Folder not found'
+            logger.error(f'La carpeta de grabaciones no existe (timeout): {folder_path}')
+            return job_error('Folder not found')
+
+        # 2) Comprobar que ambos wav existan y tengan tamaño > 0 (esperar un tiempo)
+        wav_files = [f"{base_name}-Rx.wav", f"{base_name}-Tx.wav"]
+        start_time = time.time()
+        while True:
+            present = []
+            for wav in wav_files:
+                p = os.path.join(folder_path, wav)
+                if os.path.isfile(p):
+                    try:
+                        if os.path.getsize(p) > 0:
+                            present.append(wav)
+                        else:
+                            logger.debug(f"{p} exists but size 0, waiting")
+                    except OSError:
+                        logger.debug(f"Could not stat {p}, waiting")
+                else:
+                    logger.debug(f"{p} not present yet")
+            if set(present) == set(wav_files):
+                break
+            if time.time() - start_time > FILE_WAIT_SEC:
+                logger.error(f"WAV files not ready in {FILE_WAIT_SEC}s: missing or zero-size in {folder_path}")
+                # Decide: skip job or return error. Mejor devolver error para que productor reintente.
+                return job_error('WAV files not ready')
+            time.sleep(FILE_POLL_INTERVAL)
 
         wav_files = [f"{base_name}-Rx.wav", f"{base_name}-Tx.wav"]
         transcription_results = []
@@ -512,14 +551,14 @@ def task_process_audiofile(_, job):
 
     except Exception as e:
         logger.exception(f'Error irrecuperable al procesar el job: {e}')
-        return b'Fail'
+        return job_error('Fail')
 
 
 # --- 6. Arranque del Worker ---
 if __name__ == "__main__":
     gm_worker = gearman.GearmanWorker([GEARMAN_SERVER])
-    gm_worker.register_task(TASK_NAME, task_process_audiofile)
-    logger.info(f"Worker de Gearman listo para recibir tareas en '{TASK_NAME.decode()}'...")
+    gm_worker.register_task(TASK_NAME, task_process_audiofile)  # TASK_NAME es bytes
+    logger.info(f"Worker de Gearman listo para recibir tareas en '{TASK_NAME_STR}'...")
     try:
         gm_worker.work()
     except gearman.errors.ServerUnavailable:
