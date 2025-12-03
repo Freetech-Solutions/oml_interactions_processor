@@ -1,89 +1,85 @@
 # syntax=docker/dockerfile:1
 
 ########################################
-# 0) Base builder común: deps sistema + venv
+# 1) Base builder: system deps + venv + pip install
 ########################################
-FROM python:3.12-slim AS base-builder
+FROM python:3.12-slim AS builder
 
-# deps para compilación y audio
+ENV DEBIAN_FRONTEND=noninteractive
+
+# deps para compilación y audio (build-essential solo en builder)
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      git build-essential ffmpeg sox && \
+      git build-essential ffmpeg wget ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# venv aislado
+# Crear venv ANTES de instalar dependencias
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-########################################
-# 1) Builder SaaS: sólo deps remotas
-########################################
-FROM base-builder AS builder-saas
+# Actualizar pip/packaging dentro del venv
+RUN python -m pip install --upgrade pip setuptools wheel
 
-COPY requirements_saas.txt .
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r requirements_saas.txt
+# Copiar requirements y pip install dentro del venv
+COPY requirements.txt .
+# Prefer binary wheels but allow fallback if binary missing
+RUN python -m pip install --no-cache-dir --prefer-binary -r requirements.txt
 
-########################################
-# 2) Builder On-Premise: SaaS + Whisper/Triton
-########################################
-FROM builder-saas AS builder-onprem
-
-# añadimos sólo lo que falta para el motor local
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir triton==3.3.1 openai-whisper==20250625
+# Copiar código (para aprovechar cache de capas)
+COPY src/ /app
 
 ########################################
-# 3) Imagen final SaaS
+# 2) Imagen final (runtime)
 ########################################
-FROM python:3.12-slim AS saas
+FROM python:3.12-slim AS run
 
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Runtime deps: solo lo necesario (no build-essential)
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg sox && \
+    apt-get install -y --no-install-recommends ffmpeg wget ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# usuario con home válido para cache de 3rd-party libs
-RUN addgroup --system appgroup \
- && adduser --system --ingroup appgroup --home /home/omnileads -u 1000 omnileads \
- && mkdir -p /home/omnileads/.cache \
- && chown -R omnileads:appgroup /home/omnileads
-
-# traemos sólo el venv con deps SaaS
-COPY --from=builder-saas /opt/venv /opt/venv
-
 WORKDIR /app
-COPY src/callrec_transcriber.py .
 
-ENV PATH="/opt/venv/bin:$PATH" \
-    HOME=/home/omnileads
+# copiar venv y app desde builder
+COPY --from=builder /opt/venv /opt/venv
+COPY --from=builder /app /app
 
-USER omnileads
-CMD ["python", "callrec_transcriber.py"]
-
-########################################
-# 4) Imagen final On-Premise
-########################################
-FROM python:3.12-slim AS onpremise
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends ffmpeg sox && \
-    rm -rf /var/lib/apt/lists/*
-
+# instanciar usuario/grupo sistema (sin forzar UID)
 RUN addgroup --system appgroup \
- && adduser --system --ingroup appgroup --home /home/omnileads -u 1000 omnileads \
- && mkdir -p /home/omnileads/.cache \
- && chown -R omnileads:appgroup /home/omnileads
+ && adduser --system --ingroup appgroup --home /home/omnileads --no-create-home omnileads \
+ && mkdir -p /home/omnileads/.cache
 
-# traemos el venv con deps SaaS + Whisper/Triton
-COPY --from=builder-onprem /opt/venv /opt/venv
+# asegurar que el venv y el app dir sean legibles por omnileads
+RUN chown -R omnileads:appgroup /opt/venv /app /home/omnileads
 
-WORKDIR /app
-COPY src/callrec_transcriber.py .
+# crear el directorio HF_HOME (model cache) — el entrypoint hará chown si es necesario
+RUN mkdir -p /opt/models /opt/models/hub
 
+# copiar entrypoint y hacerlo ejecutable
+COPY src/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# instalar gosu para hacer exec como usuario no-root de forma segura
+RUN set -eux; \
+    dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+    wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/1.16/gosu-${dpkgArch}"; \
+    chmod +x /usr/local/bin/gosu; \
+    gosu --version || true
+
+# Env defaults
 ENV PATH="/opt/venv/bin:$PATH" \
-    HOME=/home/omnileads
+    HOME=/home/omnileads \
+    HF_HOME=/opt/models \
+    FASTER_WHISPER_DEVICE=cpu \
+    FASTER_WHISPER_COMPUTE_TYPE=int8 \
+    WHISPER_MODEL=small \
+    OMNILEADS_USER=omnileads \
+    OMNILEADS_GROUP=appgroup
 
-USER omnileads
+# ENTRYPOINT prepara (como root) y luego lanza el CMD como omnileads
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "callrec_transcriber.py"]

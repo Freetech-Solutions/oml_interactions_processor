@@ -52,27 +52,14 @@ callrec_compressor:
     BUILD_CONTEXT: "callrec_compressor"
 
 # ---------------------------------------------------------
-# JOB: callrec_transcriber SaaS (añade sufijo -saas)
-# ---------------------------------------------------------
-callrec_transcriber_saas:
-  extends: .build_template
-  stage: build
-  variables:
-    IMAGE_NAME: "callrec_transcriber"
-    DOCKERFILE_PATH: "callrec_transcriber/Dockerfile"
-    BUILD_CONTEXT: "callrec_transcriber"
-    DOCKER_BUILD_ARGS: "--target=saas"
-    TAG_SUFFIX: "-saas"
-
-# ---------------------------------------------------------
 # JOB: callrec_transcriber Local (añade sufijo -local)
 # ---------------------------------------------------------
-callrec_transcriber_local:
+callrec_transcriber:
   extends: .build_template
   stage: build
   variables:
     IMAGE_NAME: "callrec_transcriber"
     DOCKERFILE_PATH: "callrec_transcriber/Dockerfile"
     BUILD_CONTEXT: "callrec_transcriber"
-    DOCKER_BUILD_ARGS: "--target=onpremise"
-    TAG_SUFFIX: "-local"
+    DOCKER_BUILD_ARGS: "--target=run"
+    
