@@ -1,7 +1,8 @@
-triton==3.3.1
-openai-whisper==20250625
-openai==1.97.0
 boto3==1.39.8
-git+https://github.com/alejandrozf/python-gearman.git@azf-fix-python-3.12.8#egg=gearman3
-requests==2.32.4
+ctranslate2==4.6.0
+faster-whisper==1.2.0
 google-generativeai==0.8.5
+google-cloud-speech==2.34.0
+openai==2.6.0
+requests==2.32.5
+git+https://github.com/alejandrozf/python-gearman.git@azf-fix-python-3.12.8#egg=gearman3
