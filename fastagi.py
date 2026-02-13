@@ -37,7 +37,6 @@ CALLDATA_WAIT_KEY = 'OML:CALLDATA:WAIT-TIME:CAMP:{0}'
 CALLEVENTS_CHANNEL = 'OML:CHANNEL:CALLEVENTS'
 
 
-
 class FastAGIServer(threading.Thread):
     def __init__(self):
         super().__init__()
@@ -308,6 +307,13 @@ class FastAGIServer(threading.Thread):
         except redis.exceptions.RedisError as e:
             root_logger.error("Error executing Redis command: %s", e)
 
+    def positive_int_or_none(self, v):
+        try:
+            iv = int(v)
+            return v if iv > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     def omni_survey_answer(self, agi, *args, **kwargs):
         if not args or len(args[0]) != 9:
             root_logger.error(
@@ -319,12 +325,12 @@ class FastAGIServer(threading.Thread):
         respuesta_dict = {
             'campana_id': respuesta[0],
             'pregunta_id': respuesta[1],
-            'opcion_id': None if respuesta[2] == '-1' else respuesta[2],
+            'opcion_id': self.positive_int_or_none(respuesta[2]),
             'fecha': respuesta[3],
             'callid': respuesta[4],
             'callerid': respuesta[5],
-            'contacto_id': None if respuesta[6] == '-1' else respuesta[6],
-            'agente_id': None if respuesta[7] == '-1' else respuesta[7],
+            'contacto_id': self.positive_int_or_none(respuesta[6]),
+            'agente_id': self.positive_int_or_none(respuesta[7]),
             'grabacion': None if respuesta[8] == '-1' else respuesta[8],
         }
 

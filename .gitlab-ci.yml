@@ -1,3 +1,7 @@
+variables:
+  # Default IMAGE_VERSION is empty so GitLab shows it in the UI as optional
+  IMAGE_VERSION: ""
+
 stages:
   - build
 
@@ -16,16 +20,18 @@ container-image-dev:
       --target=run
       .
     - |-
+      # If IMAGE_VERSION is empty, calculate default
+      if [ -z "${IMAGE_VERSION}" ]; then
+        IMAGE_VERSION="$(date +%Y%m%d)-${CI_COMMIT_SHORT_SHA}"
+      fi
       if [ "${CI_COMMIT_BRANCH}" == "main" ]; then
         echo "${DOCKER_SECRET}" | docker login --username "${DOCKER_USERNAME}" --password-stdin
-        IMAGE_VERSION="$(date +%Y%m%d)-${CI_COMMIT_SHORT_SHA}"
         docker tag run omnileads/fastagi:$IMAGE_VERSION
         docker push docker.io/omnileads/fastagi:$IMAGE_VERSION
       else
         echo "${DOCKER_PASSWORD}" | docker login --username "${DOCKER_USER}" --password-stdin
-        IMAGE_VERSION="$(date +%Y%m%d)-${CI_COMMIT_SHORT_SHA}"
         docker tag run freetechsolutions/fastagi:$IMAGE_VERSION
         docker push docker.io/freetechsolutions/fastagi:$IMAGE_VERSION
       fi  
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "web"'
+  only:
+    - web
