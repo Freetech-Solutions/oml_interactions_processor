@@ -227,8 +227,8 @@ except ImportError:
 
 # S3
 s3_bucket = os.getenv('S3_BUCKET_NAME')
-aws_key = os.getenv('AWS_ACCESS_KEY_ID')
-aws_secret = os.getenv('AWS_SECRET_ACCESS_KEY')
+aws_key = os.getenv('BUCKET_ACCESS_KEY_ID')
+aws_secret = os.getenv('BUCKET_SECRET_ACCESS_KEY')
 
 _s3_client: Optional[Any] = None
 

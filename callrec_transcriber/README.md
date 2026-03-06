@@ -20,8 +20,8 @@ Worker **Gearman** que recibe la **clave S3** del archivo MP3 de una grabación 
 | Variable | Descripción | Default |
 |----------|-------------|---------|
 | `S3_BUCKET_NAME` | Bucket S3 | *(requerido)* |
-| `AWS_ACCESS_KEY_ID` | Key S3 | *(requerido)* |
-| `AWS_SECRET_ACCESS_KEY` | Secret S3 | *(requerido)* |
+| `BUCKET_ACCESS_KEY_ID` | Key S3 | *(requerido)* |
+| `BUCKET_SECRET_ACCESS_KEY` | Secret S3 | *(requerido)* |
 | `S3_ENDPOINT` | Endpoint custom (MinIO, etc.) | *(opcional)* |
 | `S3_REGION_NAME` | Región AWS | *(opcional)* |
 | `STT_ENGINE` | Motor STT: `local`, `openai`, `gemini`, `elevenlabs` | `local` |
@@ -117,8 +117,8 @@ services:
     environment:
       - STT_ENGINE=gemini
       - S3_BUCKET_NAME=mybucket
-      - AWS_ACCESS_KEY_ID=yourkey
-      - AWS_SECRET_ACCESS_KEY=yoursecret
+      - BUCKET_ACCESS_KEY_ID=yourkey
+      - BUCKET_SECRET_ACCESS_KEY=yoursecret
       - STT_API_KEY=your-gemini-or-openai-key
       - GEARMAN_HOST=gearman:4730
       - SUMMARIZE_ENABLED=true

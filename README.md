@@ -15,9 +15,9 @@ The following list of environment variables needs to be passed when running the 
 GEARMAN_HOST
 S3_BUCKET_NAME
 S3_ENDPOINT
-AWS_ACCESS_KEY_ID
-AWS_SECRET_ACCESS_KEY
-AWS_DEFAULT_REGION
+BUCKET_ACCESS_KEY_ID
+BUCKET_SECRET_ACCESS_KEY
+BUCKET_DEFAULT_REGION
 ```
 
 Requests are received through a Gearman Job Server (tel_callrec) queue and are sent from an Asterisk ACD instance that has just finished generating a recording of a telephone call.
