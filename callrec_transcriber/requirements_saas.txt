@@ -1,5 +1,6 @@
 openai==1.97.0
 boto3==1.39.8
+pydantic>=2.5
 git+https://github.com/alejandrozf/python-gearman.git@azf-fix-python-3.12.8#egg=gearman3
 requests==2.32.4
 google-generativeai==0.8.5

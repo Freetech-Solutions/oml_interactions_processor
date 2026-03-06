@@ -1,197 +1,169 @@
 # Call Recording Transcriber Worker
 
-A Python-based **Gearman worker** that transcribes **Asterisk call recordings (WAV)** into text using multiple **Speech-to-Text (STT)** engines, such as:
+Worker **Gearman** que recibe la **clave S3** del archivo MP3 de una grabación (`callid`), lo descarga de S3, convierte a WAV, transcribe con varios motores STT y opcionalmente **sumariza** el texto, subiendo transcripción y resumen al mismo bucket S3.
 
-- **Faster-Whisper (local)**
-- **OpenAI Whisper API (SaaS)**
-- **Google Gemini (SaaS)**
-- **Google Cloud Speech-to-Text (SaaS)**
-
-Each processed call produces both a **per-channel transcription** and a **consolidated JSON file** with timestamps, which are uploaded to an **S3-compatible storage**.
+**Flujo:** No requiere volumen compartido con Asterisk; todo el audio se obtiene y se guarda vía S3.
 
 ---
 
-## 🧩 Features
+## Features
 
-- Supports **multiple STT engines** (local and cloud-based)
-- Optional **silence trimming** using FFmpeg
-- **Segmented transcription output** (with timestamps and channel separation)
-- **Uploads results to S3** (both `.txt` and `.json`)
-- Automatic cleanup of temporary and processed files
-- Can override engine or language per job dynamically
+- **Payload mínimo:** solo `callid` (clave S3 del MP3, ej: `20260102/1767378633.10.mp3`)
+- **Motores STT:** Faster-Whisper (local, acepta MP3 directamente), OpenAI Whisper, Google Gemini, ElevenLabs
+- **Sumarización:** configurable con Gemini, OpenAI, DeepSeek, Llama (Groq/Ollama) y otros compatibles con API OpenAI (resumen de la llamada)
+- **Salida en S3:** mismo prefijo que la grabación: `.json`, `.txt` y `.summary.txt`
 
 ---
 
-## ⚙️ Environment Variables
+## Variables de entorno
 
-| Variable | Description | Default |
-|-----------|--------------|----------|
-| `STT_ENGINE` | Transcription engine (`local`, `openai`, `gemini`, `gcp`) | `local` |
-| `TASK_NAME` | Gearman task name | `tel-callrec-transcriber` |
-| `GEARMAN_HOST` | Gearman server and port | `gearman:4730` |
-| `ASTERISK_MONITOR_PATH` | Path to Asterisk recordings | `/var/spool/asterisk/monitor` |
-| `S3_BUCKET_NAME` | Target S3 bucket | *(required)* |
-| `AWS_ACCESS_KEY_ID` | AWS/S3 key | *(required)* |
-| `AWS_SECRET_ACCESS_KEY` | AWS/S3 secret | *(required)* |
-| `S3_ENDPOINT` | Custom endpoint (for MinIO, etc.) | *(optional)* |
-| `S3_REGION_NAME` | AWS region name | *(optional)* |
-| `USE_FFMPEG_TRIM` | Enable silence trimming | `false` |
-| `TRIM_STOP_DURATION` | Minimum silence duration (sec) | `0.5` |
-| `TRIM_THRESHOLD_DB` | Silence threshold (dB) | `-50` |
-| `STT_API_KEY` | API key for OpenAI/Gemini engines | *(required for SaaS engines)* |
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `S3_BUCKET_NAME` | Bucket S3 | *(requerido)* |
+| `AWS_ACCESS_KEY_ID` | Key S3 | *(requerido)* |
+| `AWS_SECRET_ACCESS_KEY` | Secret S3 | *(requerido)* |
+| `S3_ENDPOINT` | Endpoint custom (MinIO, etc.) | *(opcional)* |
+| `S3_REGION_NAME` | Región AWS | *(opcional)* |
+| `STT_ENGINE` | Motor STT: `local`, `openai`, `gemini`, `elevenlabs` | `local` |
+| `SUMMARIZE_ENGINE` | Motor sumarización: `gemini`, `openai`, `deepseek`, `llama` | `gemini` |
+| `SUMMARIZE_FALLBACK_ENGINE` | Motor de respaldo si el principal falla (ej. `gemini`) | *(opcional)* |
+| `SUMMARIZE_ENABLED` | Activar sumarización por defecto | `true` |
+| `STT_API_KEY` | API key OpenAI / Gemini | *(para SaaS)* |
+| `GEMINI_API_KEY` | API key Gemini (alternativa a STT_API_KEY) | *(opcional)* |
+| `ELEVENLABS_API_KEY` | API key ElevenLabs | *(para motor elevenlabs)* |
+| `TASK_NAME` | Nombre de la tarea Gearman | `tel-callrec-transcriber` |
+| `GEARMAN_HOST` | Servidor Gearman | `gearman:4730` |
 
-### Engine-specific variables
+### Por motor
 
 #### Faster-Whisper (local)
-| Variable | Description | Default |
-|-----------|--------------|----------|
-| `WHISPER_MODEL` | Model name | `small` |
-| `FASTER_WHISPER_DEVICE` | `cpu` or `cuda` | `cpu` |
-| `FASTER_WHISPER_COMPUTE_TYPE` | Precision type (`int8`, `float16`, etc.) | `int8` |
-| `FW_VAD_FILTER` | Apply VAD filter | `true` |
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `WHISPER_MODEL` | Modelo | `small` |
+| `FASTER_WHISPER_DEVICE` | `cpu` o `cuda` | `cpu` |
+| `FASTER_WHISPER_COMPUTE_TYPE` | `int8`, `float16`, etc. | `int8` |
 
-#### Google Cloud Speech
-| Variable | Description | Default |
-|-----------|--------------|----------|
-| `GCP_SPEECH_MODEL` | Recognition model (`phone_call`, `default`, `latest_long`) | `phone_call` |
+#### Sumarización
+| Variable | Descripción | Default |
+|----------|-------------|---------|
+| `SUMMARIZE_MODEL` | Modelo (Gemini: `gemini-1.5-flash`, OpenAI: `gpt-4o-mini`) | según motor |
+| `GEMINI_TRANSCRIPTION_MODEL` | Modelo Gemini para transcripción | `gemini-1.5-flash` |
+| `OPENAI_WHISPER_MODEL` | Modelo Whisper | `whisper-1` |
 
----
-
-## 🧠 Job Payload (Gearman Task)
-
-The worker expects a **JSON payload** with the following structure:
-
-```json
-{
-  "fileName": "CALL-12345",
-  "dateFileName": "2025-10-23",
-  "language": "es"
-}
-````
-
-### Required fields
-
-* `fileName`: Base name of the call recording (without suffix `-Rx` or `-Tx`)
-* `dateFileName`: Folder name (as stored by Asterisk)
-* `language`: Optional language code (e.g., `"es"`, `"en"`)
+#### Proveedores OpenAI-compatibles (DeepSeek, Llama vía Groq/Ollama)
+| Variable | Descripción |
+|----------|-------------|
+| `OPENAI_COMPATIBLE_BASE_URL` | URL base genérica (fallback si no hay vars por proveedor) |
+| `OPENAI_COMPATIBLE_API_KEY` | API key genérica |
+| `OPENAI_COMPATIBLE_MODEL` | Nombre del modelo genérico |
+| `DEEPSEEK_BASE_URL`, `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL` | Para engine `deepseek` |
+| `LLAMA_BASE_URL`, `LLAMA_API_KEY`, `LLAMA_MODEL` | Para engine `llama` (Groq/Ollama) |
 
 ---
 
-## 🧾 Output Files
-
-Each transcription produces:
-
-1. **Two text files** (one per channel):
-
-   * `CALL-12345-Rx.txt`
-   * `CALL-12345-Tx.txt`
-
-2. **A JSON file** consolidating both channels:
-
-   * `CALL-12345.json`
-
-### JSON Structure Example
+## Payload Gearman
 
 ```json
 {
-  "base_name": "CALL-12345",
-  "date_folder": "2025-10-23",
-  "engine": "openai",
+  "callid": "20260102/1767378633.10.mp3",
+  "engine": "gemini",
   "language": "es",
-  "segments": [
-    {"start": 0.0, "end": 4.2, "text": "Hola, buenos días", "channel": "Rx"},
-    {"start": 4.3, "end": 7.1, "text": "Hola, ¿con quién hablo?", "channel": "Tx"}
-  ],
-  "text_by_channel": {
-    "Rx": "Hola, buenos días",
-    "Tx": "Hola, ¿con quién hablo?"
-  }
+  "summarize": true,
+  "summarizer_engine": "deepseek",
+  "summarizer_model": "deepseek-chat"
 }
 ```
 
-All files are uploaded to:
+- **callid** (requerido): clave S3 completa del archivo MP3 en el bucket.
+- **engine**: motor de transcripción (por defecto `STT_ENGINE`).
+- **language**: código de idioma (ej: `es`, `en`).
+- **summarize**: si se aplica sumarización (por defecto `SUMMARIZE_ENABLED`).
+- **summarizer_engine**: motor de sumarización para esta llamada (`gemini`, `openai`, `deepseek`, `llama`). Por defecto `SUMMARIZE_ENGINE`.
+- **summarizer_model**: modelo a usar en esta llamada (override por job). Opcional.
 
-```
-s3://<S3_BUCKET_NAME>/<dateFileName>/<fileName>.{json|txt}
+---
+
+## Salida en S3
+
+Para `callid` = `20260102/1767378633.10.mp3` se generan:
+
+| Clave S3 | Contenido |
+|----------|-----------|
+| `20260102/1767378633.10.json` | JSON con meta, texto completo, segmentos y summary |
+| `20260102/1767378633.10.txt` | Texto plano de la transcripción |
+| `20260102/1767378633.10.summary.txt` | Resumen (si sumarización activa) |
+
+### Estructura del JSON
+
+```json
+{
+  "meta": {"s3_key": "20260102/1767378633.10.mp3", "engine": "gemini"},
+  "text": "texto transcrito completo",
+  "segments": [{"start": 0.0, "end": 4.2, "text": "..."}],
+  "summary": "resumen generado por LLM"
+}
 ```
 
 ---
 
-## 🧪 Docker Setup
+## Docker
 
-You can easily deploy this worker using Docker.
-
-### Run with Docker Compose
+No se monta volumen de grabaciones de Asterisk; el worker solo necesita red (Gearman, S3, APIs).
 
 ```yaml
-version: "3.8"
-
 services:
   callrec-transcriber:
     build: .
     environment:
-      - STT_ENGINE=local
+      - STT_ENGINE=gemini
       - S3_BUCKET_NAME=mybucket
       - AWS_ACCESS_KEY_ID=yourkey
       - AWS_SECRET_ACCESS_KEY=yoursecret
+      - STT_API_KEY=your-gemini-or-openai-key
       - GEARMAN_HOST=gearman:4730
-      - ASTERISK_MONITOR_PATH=/recordings
-    volumes:
-      - /var/spool/asterisk/monitor:/recordings
+      - SUMMARIZE_ENABLED=true
 ```
 
 ---
 
-## 🧩 Architecture Overview
+## Arquitectura
 
 ```text
-┌──────────────────────────────┐
-│     Asterisk PBX Server      │
-│   (Records WAV Files)        │
-└──────────────┬───────────────┘
-               │
-               ▼
-┌──────────────────────────────┐
-│ Gearman Queue (task)         │
-│ {"fileName": "...", ...}     │
-└──────────────┬───────────────┘
-               │
-               ▼
-┌──────────────────────────────┐
-│ Transcriber Worker           │
-│ - Loads engine (local/API)   │
-│ - Optional silence trimming  │
-│ - Creates .txt + .json       │
-│ - Uploads to S3              │
-└──────────────┬───────────────┘
-               │
-               ▼
-┌──────────────────────────────┐
-│       S3 Storage Bucket      │
-│   (Transcriptions archived)  │
-└──────────────────────────────┘
+Gearman job {"callid": "YYYYMMDD/file.mp3"}
+       │
+       ▼
+┌──────────────────┐
+│ Download MP3 S3  │
+└────────┬─────────┘
+         │
+         ├── motor local (faster-whisper) ──► Transcribir MP3 directamente
+         │
+         ▼
+┌──────────────────┐
+│ MP3 → WAV (ffmpeg)│  (solo para openai/gemini/elevenlabs)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ Transcribe (STT) │  ← local | openai | gemini | elevenlabs
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ Summarize (LLM)  │  ← gemini | openai | deepseek | llama (OpenAI-compatible)
+└────────┬─────────┘
+         ▼
+┌──────────────────┐
+│ Upload .json, .txt, .summary.txt to S3 │
+└──────────────────┘
 ```
 
 ---
 
-## 🧑‍💻 Developer Notes
+## Migración desde el formato anterior
 
-* You can dynamically override the STT engine via the job payload.
-* Use `USE_FFMPEG_TRIM=true` for recordings with long silences.
-* The worker deletes the processed WAV files automatically.
-* For cloud engines, ensure network access and correct API credentials.
+El worker ya **no** acepta `fileName` ni `dateFileName`. Quien envíe jobs debe usar `callid` con la clave S3 completa del MP3 (por ejemplo, el valor de `archivo_grabacion` en LlamadaResumen: `YYYYMMDD/filename.mp3`).
 
 ---
 
-## 🪪 License
+## Licencia
 
-This project is licensed under the **GPLV3 License**.
-See [LICENSE](LICENSE) for details.
-
----
-
-## 🏗️ Author
-
-**Fabian Pignataro**
-
-```
+GPLV3. Ver [LICENSE](LICENSE).
