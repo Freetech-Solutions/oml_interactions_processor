@@ -8,12 +8,15 @@ include:
       - 'templates/security-scans.yml'
       - 'templates/gitleaks.yml'
       - 'templates/owasp-dependency-check.yml'
+      - 'templates/sonarqube.yml'
 
 variables:
   # Valores válidos: omnileads | freetechsolutions. Vacío = según rama (main → omnileads).
   DOCKER_ORG: ""
   FULL: ""
   BUILD: ""
+  # SKIP_OWASP=true → omite owasp_dependency_scan y owasp_defectdojo_upload (útil con FULL=true).
+  SKIP_OWASP: ""
   PYTHON_VERSION: "3.12"
   DOCKER_HOST: tcp://docker:2375
   DOCKER_TLS_CERTDIR: ""
@@ -24,11 +27,17 @@ variables:
   # y este script creará/resolverá el producto y el engagement "Continuous Security" automáticamente.
   DEFECTDOJO_PRODUCT_NAME: "OMniPostcallActions"
   OWASP_PROJECT_NAME: "OMniPostcallActions"
+  # Clave del proyecto en SonarQube (debe existir o se crea en el primer análisis).
+  # Alineado con sonar-project.properties.
+  SONAR_PROJECT_KEY: "omnileads-postcall-actions"
+  SONAR_PROJECT_NAME: "OMniLeads Postcall Actions"
+  SONAR_SOURCES: "."
   # DefectDojo con certificado interno/auto-firmado (override en CI/CD si usan CA pública).
   DEFECTDOJO_INSECURE: "true"
   # Sin variables → sonarqube, build, security_scan y security_report (+ gitleaks/owasp en security).
   # BUILD=true → solo build (container-image).
   # FULL=true → pipeline completo: tests, SAST, gitleaks, owasp, sonarqube, build y escaneos de seguridad.
+  # FULL=true + SKIP_OWASP=true → igual que FULL, sin OWASP.
 
 stages:
   - security
@@ -61,7 +70,7 @@ stages:
     - if: '$FULL != "true" && $BUILD != "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$FULL != "true" && $BUILD != "true" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master-3.0" || $CI_COMMIT_BRANCH == "develop-3.0")'
 
-# Las reglas de Trivy se heredan por defecto de la plantilla central
+# Las reglas de Trivy / DefectDojo se heredan por defecto de la plantilla central
 
 .gitleaks-rules: &gitleaks-rules
   rules:
@@ -71,16 +80,20 @@ stages:
     - if: '$FULL == "true" && $CI_PIPELINE_SOURCE == "web"'
     - if: '$FULL == "true" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master-3.0" || $CI_COMMIT_BRANCH == "develop-3.0")'
     - if: '$FULL != "true" && $BUILD != "true" && $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master-3.0" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop-3.0")'
+    - if: '$FULL != "true" && $BUILD != "true" && $CI_PIPELINE_SOURCE == "web"'
     - if: '$FULL != "true" && $BUILD != "true" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master-3.0" || $CI_COMMIT_BRANCH == "develop-3.0")'
 
 .owasp-rules: &owasp-rules
   rules:
+    - if: '$SKIP_OWASP == "true"'
+      when: never
     - if: '$BUILD == "true" && $FULL != "true"'
       when: never
     - if: '$FULL == "true" && $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master-3.0" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop-3.0")'
     - if: '$FULL == "true" && $CI_PIPELINE_SOURCE == "web"'
     - if: '$FULL == "true" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master-3.0" || $CI_COMMIT_BRANCH == "develop-3.0")'
     - if: '$FULL != "true" && $BUILD != "true" && $CI_PIPELINE_SOURCE == "merge_request_event" && ($CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "main" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "master-3.0" || $CI_MERGE_REQUEST_TARGET_BRANCH_NAME == "develop-3.0")'
+    - if: '$FULL != "true" && $BUILD != "true" && $CI_PIPELINE_SOURCE == "web"'
     - if: '$FULL != "true" && $BUILD != "true" && ($CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "master-3.0" || $CI_COMMIT_BRANCH == "develop-3.0")'
 
 test:flake8:
@@ -95,24 +108,15 @@ test:flake8:
   <<: *full-pipeline-rules
   allow_failure: false
 
-sonarqube-check:
+# Job SonarQube centralizado en omnileads/devsecops (templates/sonarqube.yml).
+sonarqube_scan:
   stage: sonarqube
-  image:
-    name: sonarsource/sonar-scanner-cli:latest
-    entrypoint: [""]
-  variables:
-    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
-    GIT_DEPTH: "0"
-  cache:
-    key: "sonar-scanner-cache"
-    paths:
-      - .sonar/cache
-  script:
-    - sonar-scanner
   needs:
     - job: test:flake8
       optional: true
-  allow_failure: true
+  <<: *sonar-rules
+
+sonarqube_defectdojo_upload:
   <<: *sonar-rules
 
 .build_template:
@@ -190,13 +194,14 @@ container-image:
       - ${IMAGE_NAME}.tar
     expire_in: 90 days
 
-# Los jobs trivy_scan, defectdojo_upload, gitleaks_defectdojo_upload y owasp_defectdojo_upload se heredan de devsecops.
+# Los jobs trivy_scan, trivy_defectdojo_upload, gitleaks_defectdojo_upload, owasp_defectdojo_upload y sonarqube_defectdojo_upload se heredan de devsecops.
+# Solo se sobreescribe parallel/matrix; el job de upload de Trivy se llama trivy_defectdojo_upload (no defectdojo_upload).
 
 trivy_scan:
   parallel:
     matrix: *security-matrix
 
-defectdojo_upload:
+trivy_defectdojo_upload:
   parallel:
     matrix: *security-matrix
 
@@ -209,3 +214,7 @@ gitleaks_scan:
 owasp_dependency_scan:
   stage: security
   <<: *owasp-rules
+
+owasp_defectdojo_upload:
+  <<: *owasp-rules
+
