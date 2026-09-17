@@ -31,7 +31,7 @@ variables:
   # Alineado con sonar-project.properties.
   SONAR_PROJECT_KEY: "omnileads-postcall-actions"
   SONAR_PROJECT_NAME: "OMniLeads Postcall Actions"
-  SONAR_SOURCES: "."
+  SONAR_SOURCES: "app.py,callrec_compressor/src,callrec_transcriber/src"
   # DefectDojo con certificado interno/auto-firmado (override en CI/CD si usan CA pública).
   DEFECTDOJO_INSECURE: "true"
   # Sin variables → sonarqube, build, security_scan y security_report (+ gitleaks/owasp en security).
