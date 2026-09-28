@@ -38,39 +38,50 @@ try:
         endpoint_url=endpoint_url if storage_type != 's3-aws' else None,
         verify=(storage_type != 's3-no-check-cert')
     )
-    logger.info(f"Cliente S3 inicializado. Tipo: {storage_type}, Endpoint: {endpoint_url}, Region: {region_name}")
-except Exception as e:
+    logger.info(
+        "Cliente S3 inicializado. Tipo: %s, Endpoint: %s, Region: %s",
+        storage_type,
+        endpoint_url,
+        region_name,
+    )
+except Exception:
     logger.exception("Fallo crítico al inicializar cliente S3.")
     exit(1)
 
 gm_worker = gearman.GearmanWorker([GEARMAN_SERVER])
+
 
 # ───── Funciones Auxiliares (Helpers) ─────
 
 def upload_to_s3(source_path, destination_path, metadata):
     try:
         clean_metadata = {k: str(v) for k, v in metadata.items() if v is not None}
-        
+
         extra_args = {
             'Metadata': clean_metadata,
             # ContentType y ACL eliminados para compatibilidad con buckets cloud
         }
 
         s3.upload_file(
-            source_path, 
-            s3_bucket_name, 
+            source_path,
+            s3_bucket_name,
             destination_path,
             ExtraArgs=extra_args
         )
         logger.info(f"☁️ Subido a S3: {destination_path} | Metadata: {clean_metadata}")
         return True
-    except (NoCredentialsError, ClientError) as e:
+    except (NoCredentialsError, ClientError):
         logger.exception(f"Fallo en subida a S3 de {source_path}")
         return False
 
+
 def convert_to_mp3(source_path, mp3_path):
     try:
-        cmd = ['ffmpeg', '-y', '-i', source_path, '-codec:a', 'libmp3lame', '-qscale:a', '4', '-nostats', '-loglevel', 'error', mp3_path]
+        cmd = [
+            'ffmpeg', '-y', '-i', source_path,
+            '-codec:a', 'libmp3lame', '-qscale:a', '4',
+            '-nostats', '-loglevel', 'error', mp3_path,
+        ]
         subprocess.run(cmd, check=True)
         return True
     except subprocess.CalledProcessError:
@@ -105,8 +116,9 @@ def delete_from_s3(bucket, s3_key):
 def task_process_audiofile(gearman_worker, gearman_job):
     """
     Worker de compresión: convierte WAV a MP3 y sube a S3.
-    Si el job tiene s3_wav_key, descarga el WAV desde S3; si no, lo lee desde disco local (legacy).
-    La persistencia de `archivo_grabacion` en la base de datos la realiza el logger ACD.
+    Si el job tiene s3_wav_key, descarga el WAV desde S3; si no, lo lee desde disco
+    local (legacy). La persistencia de `archivo_grabacion` en la base de datos la
+    realiza el logger ACD.
     """
     try:
         data = json.loads(gearman_job.data.decode('utf-8'))
@@ -130,10 +142,19 @@ def task_process_audiofile(gearman_worker, gearman_job):
                 date_folder = date_obj.strftime('%Y-%m-%d')
             else:
                 date_folder = datetime.now().strftime('%Y-%m-%d')
-                logger.warning(f"⚠️ Formato de fecha inesperado: {date_dialplan}. Usando fecha actual: {date_folder}")
+                logger.warning(
+                    "⚠️ Formato de fecha inesperado: %s. Usando fecha actual: %s",
+                    date_dialplan,
+                    date_folder,
+                )
         except Exception as e:
             date_folder = datetime.now().strftime('%Y-%m-%d')
-            logger.warning(f"⚠️ Error al convertir fecha {date_dialplan}: {e}. Usando fecha actual: {date_folder}")
+            logger.warning(
+                "⚠️ Error al convertir fecha %s: %s. Usando fecha actual: %s",
+                date_dialplan,
+                e,
+                date_folder,
+            )
 
         s3_key_path = f"{date_folder}/{mp3_file}"
 
@@ -157,7 +178,11 @@ def task_process_audiofile(gearman_worker, gearman_job):
             fd_mp3, local_mp3_path = tempfile.mkstemp(suffix='.mp3')
             os.close(fd_mp3)
             temp_files.append(local_mp3_path)
-            logger.info(f"🔄 Procesando WAV desde S3 ({s3_wav_key}) hacia MP3 en S3: {s3_key_path}")
+            logger.info(
+                "🔄 Procesando WAV desde S3 (%s) hacia MP3 en S3: %s",
+                s3_wav_key,
+                s3_key_path,
+            )
         else:
             # Flujo legacy: leer WAV desde disco local (ASTERISK_MONITOR_PATH)
             source_file = f"{filename_base}.wav"
@@ -191,7 +216,11 @@ def task_process_audiofile(gearman_worker, gearman_job):
         # 2b. Si el WAV estaba en S3, eliminarlo del bucket tras subida exitosa del MP3
         if use_s3_source:
             if not delete_from_s3(job_bucket, s3_wav_key):
-                logger.warning(f"No se pudo eliminar el WAV en S3: s3://{job_bucket}/{s3_wav_key}")
+                logger.warning(
+                    "No se pudo eliminar el WAV en S3: s3://%s/%s",
+                    job_bucket,
+                    s3_wav_key,
+                )
 
         # 3. Limpiar archivos locales
         try:
@@ -207,9 +236,10 @@ def task_process_audiofile(gearman_worker, gearman_job):
 
         return b'Ok'
 
-    except Exception as e:
-        logger.exception(f"Error no controlado en el worker")
+    except Exception:
+        logger.exception("Error no controlado en el worker")
         return b'Fail'
+
 
 # ───── Loop de Espera ─────
 

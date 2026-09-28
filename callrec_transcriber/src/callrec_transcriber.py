@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 from pydantic import ValidationError as PydanticValidationError
 
 os.environ.setdefault("DJANGO_SETTINGS_MODULE", "django_settings")
-from status_updates import SpeechAnalysisStatusUpdater
+from status_updates import SpeechAnalysisStatusUpdater  # noqa: E402
 
 # --- Modelos Pydantic (validación de respuestas IA y payload) ---
 
@@ -949,7 +949,7 @@ def process_job(worker, job):
             except OSError:
                 pass
 
-    except Exception as e:
+    except Exception:
         logger.exception("Error fatal en worker")
         try:
             payload_dict = json.loads(job.data.decode("utf-8"))
